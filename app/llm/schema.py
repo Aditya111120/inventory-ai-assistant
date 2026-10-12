@@ -51,6 +51,13 @@ QuestionKind = Literal[
     "clarification",
     "out_of_scope",
 ]
+AnalysisScope = Literal["unspecified", "organization", "store"]
+InventoryClassification = Literal[
+    "excess_by_max_level",
+    "excess_coverage_candidate",
+    "slow_moving_candidate",
+    "no_recorded_sales",
+]
 
 
 class Filters(BaseModel):
@@ -115,6 +122,8 @@ class SubQuestion(BaseModel):
     capability: Capability
     metrics: list[Metric]
     filters: Filters
+    analysis_scope: AnalysisScope = "unspecified"
+    inventory_classification: Optional[InventoryClassification] = None
     group_by: Optional[Dimension] = None
     sort: Optional[Sort] = None
     limit: Optional[int] = None
@@ -125,6 +134,8 @@ class Intent(BaseModel):
     capability: Capability
     metrics: list[Metric] = Field(default_factory=list)
     filters: Filters = Field(default_factory=Filters)
+    analysis_scope: AnalysisScope = "unspecified"
+    inventory_classification: Optional[InventoryClassification] = None
     group_by: Optional[Dimension] = None
     time: TimeWindow = Field(default_factory=TimeWindow)
     threshold: Optional[Threshold] = None

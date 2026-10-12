@@ -300,7 +300,7 @@ def validate_narrative_evidence(intent, df: pd.DataFrame, narrative: str) -> lis
         if f"{limit} " not in narrative:
             errors.append("ranking narrative does not identify the requested displayed count")
         narrative_positions: list[int] = []
-        for _, row in ranked.head(limit).iterrows():
+        for _, row in ranked.head(1).iterrows():
             name = str(row.get("product_name", "")).strip()
             position = narrative.casefold().find(name.casefold()) if name else -1
             if name and position < 0:
@@ -344,7 +344,7 @@ def validate_narrative_evidence(intent, df: pd.DataFrame, narrative: str) -> lis
                 errors.append("ranking narrative does not identify the requested top-N count")
             formatter = _inr if sort_column in {"revenue", "inventory_value"} else _number
             narrative_positions: list[int] = []
-            for _, row in ranked.head(limit).iterrows():
+            for _, row in ranked.head(1 if limit > 1 else limit).iterrows():
                 name = str(row.get(group_column, "")).strip()
                 value = row.get(sort_column)
                 position = narrative.casefold().find(name.casefold()) if name else -1
@@ -352,7 +352,7 @@ def validate_narrative_evidence(intent, df: pd.DataFrame, narrative: str) -> lis
                     errors.append(f"ranked {group} {name} is missing from the narrative")
                 elif position >= 0:
                     narrative_positions.append(position)
-                if limit > 1 and pd.notna(value) and f"{name}: {formatter(value)}".casefold() not in narrative.casefold():
+                if limit > 1 and pd.notna(value) and formatter(value).casefold() not in narrative.casefold():
                     errors.append(f"ranked metric value for {name or group} is missing")
             if narrative_positions != sorted(narrative_positions):
                 errors.append(f"ranked {group} results are not narrated in calculated order")
@@ -542,7 +542,7 @@ def _build_ranking_answer(
         ranked = ranked.sort_values(sort_columns, ascending=ascending, na_position="last", kind="stable")
         count = max(1, min(int(getattr(intent, "limit", None) or 1), len(ranked)))
         rows = []
-        for _, row in ranked.head(count).iterrows():
+        for _, row in ranked.head(1).iterrows():
             identity = str(row.get("product_name") or "Product")
             if pd.notna(row.get("store_name")):
                 identity += f" at {row['store_name']}"
@@ -561,20 +561,12 @@ def _build_ranking_answer(
             return "No positions meet the approved High or Medium stockout-risk criteria in this scope."
         counts = dict(df.attrs.get("result_counts", {}))
         matched = int(counts.get("matching_result_rows", len(ranked)))
-        total_note = f" from {matched} qualifying positions"
-        product_count = counts.get("distinct_products")
-        product_note = (
-            f" across {int(product_count)} distinct products"
-            if product_count is not None
-            else ""
-        )
         ranking_label = "highest-risk" if descending else "lowest-risk"
         eligible_note = "" if descending else " within the eligible High/Medium set"
         return (
-            f"The {len(rows)} {ranking_label} product-store positions{eligible_note}{total_note}{product_note}, "
-            "ranked by Business Rules V1 risk severity and coverage, are: "
-            + "; ".join(rows)
-            + "."
+            f"The {ranking_label} position{eligible_note} is "
+            f"{rows[0]} among {matched} qualifying positions; "
+            f"{count} results are shown in the table."
         )
 
     ascending = direction == "asc"
@@ -624,12 +616,35 @@ def _build_ranking_answer(
         }.get(sort_by, _metric_label(sort_by))
         formatter = _inr if sort_by in {"sales_revenue", "inventory_value"} else _number
         direction = "highest" if not ascending else "lowest"
-        records = "; ".join(
-            f"{row[group_column]}: {formatter(row[column])}"
-            for _, row in winners.iterrows()
-            if pd.notna(row.get(group_column))
+        winner = winners.iloc[0]
+        winner_name = str(winner[group_column])
+        location = ""
+        if (
+            group_column != "store_name"
+            and "store_name" in winner.index
+            and pd.notna(winner.get("store_name"))
+        ):
+            location = f" at {winner['store_name']}"
+            if "city" in winner.index and pd.notna(winner.get("city")):
+                location += f", {winner['city']}"
+        value = formatter(winner[column])
+        if sort_by == "stockout_risk":
+            risk_column = (
+                "stockout_risk_v1"
+                if "stockout_risk_v1" in winner.index
+                else "stockout_risk"
+            )
+            risk = winner.get(risk_column)
+            doi = winner.get("days_of_inventory")
+            detail = f"{risk} risk"
+            if doi is not None and pd.notna(doi):
+                detail += f"; {_number(doi)} days of coverage"
+            value = detail
+        return (
+            f"The {direction} {label} by {metric_label} is "
+            f"{winner_name}{location} ({value}), among "
+            f"{len(ordered)} returned results."
         )
-        return f"The {top_n} {direction} {label} results by {metric_label} are {records}."
 
     winner = winners.iloc[0]
     winner_name = str(winner[group_column])
@@ -920,7 +935,135 @@ def _build_group_comparison_answer(intent, df: pd.DataFrame) -> str:
     }.get(group, "groups")
     result = f"{high[group_column]} leads in {label} among {group_label} with {_inr(high[value_column]) if label in {'revenue', 'inventory value'} else _number(high[value_column])}, compared with {low[group_column]} at {_inr(low[value_column]) if label in {'revenue', 'inventory value'} else _number(low[value_column])}."
     result += f" The difference is {_inr(difference) if label in {'revenue', 'inventory value'} else _number(difference)}"
-    return result + (f" ({percent:.1f}% higher)." if percent is not None else ".")
+    result += f" ({percent:.1f}% higher)." if percent is not None else "."
+    if metric == "inventory_value":
+        result += (
+            " This is an Actual result."
+        )
+    return result
+
+
+def _inventory_scope_label(intent, df: pd.DataFrame) -> str:
+    stores = (
+        df["store_name"].dropna().astype(str).unique().tolist()
+        if "store_name" in df.columns else []
+    )
+    cities = (
+        df["city"].dropna().astype(str).unique().tolist()
+        if "city" in df.columns else []
+    )
+    filters = getattr(intent, "filters", None)
+    requested_stores = list(getattr(filters, "stores", []) or []) if filters else []
+    if len(stores) == 1 and (requested_stores or len(df) == 1):
+        return f"at {stores[0]}" + (f", {cities[0]}" if len(cities) == 1 else "")
+    if len(cities) == 1:
+        return f"in {cities[0]}"
+    if "store_id" in df.columns:
+        store_count = int(df["store_id"].nunique(dropna=True))
+        if store_count:
+            return f"across {store_count} authorized stores"
+    return "in the authorized scope"
+
+
+def _sales_observation_window(df: pd.DataFrame, rules=None) -> str:
+    attrs = df.attrs
+    start = attrs.get("sales_window_start_exclusive")
+    end = attrs.get("sales_window_end_inclusive")
+    if start and end:
+        return f"the sales window after {start} through {end}"
+    days = attrs.get("window_days") or getattr(rules, "sales_window_days", None)
+    return f"the approved {int(days)}-day sales window" if days else "the selected sales window"
+
+
+def _inventory_snapshot_text(df: pd.DataFrame) -> str:
+    for column in ("inventory_snapshot_date", "snapshot_date"):
+        if column in df.columns:
+            dates = df[column].dropna().astype(str).unique().tolist()
+            if len(dates) == 1:
+                return f" Inventory snapshot as of {dates[0]}."
+    return ""
+
+
+def _build_inventory_classification_answer(intent, df: pd.DataFrame, rules=None) -> str:
+    classification = getattr(intent, "inventory_classification", None)
+    if classification not in {
+        "slow_moving_candidate",
+        "no_recorded_sales",
+        "excess_by_max_level",
+        "excess_coverage_candidate",
+    }:
+        return ""
+
+    counts = dict(df.attrs.get("result_counts", {}))
+    positions = int(counts.get("product_store_positions", len(df)))
+    products = int(counts.get(
+        "distinct_products",
+        df["product_id"].nunique(dropna=True) if "product_id" in df else len(df),
+    ))
+    scope = _inventory_scope_label(intent, df)
+
+    if classification in {"slow_moving_candidate", "no_recorded_sales"}:
+        window = _sales_observation_window(df, rules)
+        label = (
+            "slow-moving candidates (1–2 recorded sales units)"
+            if classification == "slow_moving_candidate"
+            else "positions with no recorded sales (0 units)"
+        )
+        if df.empty:
+            if classification == "slow_moving_candidate":
+                return (
+                    f"No product-store positions met the 1–2 recorded sales-unit "
+                    f"slow-moving rule {scope} during {window}. Zero-sales "
+                    "positions are classified separately as No Recorded Sales."
+                )
+            return (
+                f"No product-store positions with zero recorded sales were found "
+                f"{scope} during {window}. Slow-moving candidates with 1–2 "
+                "recorded units are a separate classification."
+            )
+
+        lead = (
+            f"Found {positions} {label} across {products} distinct products "
+            f"{scope} during {window}."
+        )
+        if not df.empty:
+            row = df.iloc[0]
+            identity = str(row.get("product_name") or "A qualifying product")
+            location = ""
+            if pd.notna(row.get("store_name")):
+                location = f" at {row['store_name']}"
+                if pd.notna(row.get("city")):
+                    location += f", {row['city']}"
+            units = row.get("units_sold_window")
+            if units is not None and pd.notna(units):
+                lead += (
+                    f" {identity}{location} recorded "
+                    f"{_number(units)} sales units."
+                )
+        return f"{lead} Actual inventory and recorded sales."
+
+    if df.empty:
+        if classification == "excess_coverage_candidate":
+            threshold = getattr(rules, "excess_days_of_inventory", None)
+            rule = f"DOI greater than {threshold:g} days" if threshold is not None else "the configured excess-coverage rule"
+        else:
+            rule = "quantity on hand above the configured maximum level"
+        return f"No product-store positions met {rule} in the authorized scope."
+
+    if classification == "excess_coverage_candidate":
+        threshold = getattr(rules, "excess_days_of_inventory", None)
+        condition = (
+            f"days of inventory greater than {threshold:g}"
+            if threshold is not None else "the configured excess-coverage threshold"
+        )
+    else:
+        condition = "quantity on hand above the configured maximum level"
+    return (
+        f"Found {positions} product-store positions across {products} products "
+        f"{scope} with {condition}. The result table shows the qualifying "
+        f"quantities, thresholds, and supporting inventory evidence."
+        f"{_inventory_snapshot_text(df)} This is an Actual result."
+    )
 
 
 def _build_lookup_answer(
@@ -1268,7 +1411,7 @@ def _build_why_answer(
     return ""
 
 
-def build_answer(
+def _build_answer_unabridged(
     *,
     question: str,
     intent,
@@ -1291,6 +1434,9 @@ def build_answer(
 
     capability = getattr(intent, "capability", "")
     if df.empty:
+        classification_answer = _build_inventory_classification_answer(intent, df, rules)
+        if classification_answer:
+            return classification_answer
         if capability == "stockout_risk":
             return "No products in the current scope are classified as High or Medium stockout risk. Low risk and No demand are excluded from this at-risk result."
         if capability == "inventory_health":
@@ -1304,6 +1450,10 @@ def build_answer(
     )
 
     capability = getattr(intent, "capability", "")
+
+    classification_answer = _build_inventory_classification_answer(intent, df, rules)
+    if classification_answer:
+        return classification_answer
 
     if getattr(intent, "question_kind", "") == "comparison":
         comparison_answer = _build_group_comparison_answer(intent, df)
@@ -1396,33 +1546,19 @@ def build_answer(
         quantity = _number(first.get("quantity_on_hand"))
         doi = _number(first.get("days_of_inventory"))
         lead_time = _number(first.get("lead_time_days"))
-        if risk == "High" and pd.notna(first.get("days_of_inventory")) and pd.notna(first.get("lead_time_days")):
-            rule_basis = (
-                f"V1 classifies it High because coverage ({doi} days) is below "
-                f"supplier lead time ({lead_time} days)."
-            )
-        elif risk == "Medium" and pd.notna(first.get("days_of_inventory")) and pd.notna(first.get("lead_time_days")):
-            buffer = getattr(rules, "safety_buffer_days", None)
-            if buffer is not None:
-                rule_basis = (
-                    f"V1 classifies it Medium because coverage ({doi} days) reaches "
-                    f"lead time ({lead_time} days) but is below lead time plus the "
-                    f"{_number(buffer)}-day safety buffer."
-                )
-            else:
-                rule_basis = "V1 classifies its coverage as Medium under the configured lead-time safety-buffer rule."
-        else:
-            rule_basis = "The classification follows Business Rules V1; the available inputs do not support a stronger runout claim."
         location_scope = f"in {city_names[0]}" if len(city_names) == 1 else "in the authorized scope"
         high_text = f"{high} High-risk {'position' if high == 1 else 'positions'}"
         medium_text = f"{medium} Medium-risk {'position' if medium == 1 else 'positions'}"
         product_text = f"{products} {'product' if products == 1 else 'products'}"
         store_text = f"{stores} {'store' if stores == 1 else 'stores'}"
+        window = _sales_observation_window(df, rules)
         return (
-            f"Across the qualifying positions {location_scope}, {high_text} and {medium_text} qualify, "
-            f"covering {product_text} across {store_text}. A leading returned position is "
-            f"{_name(first)}{location}: {quantity} units on hand, {doi} days of coverage, "
-            f"and {lead_time} days of supplier lead time. {rule_basis}"
+            f"Across the qualifying positions {location_scope}, {high_text} and "
+            f"{medium_text} qualify among {product_text} across {store_text}. "
+            f"{_name(first)}{location} has {quantity} units on hand, {doi} days "
+            f"of coverage, and {lead_time} days of supplier lead time. "
+            f"Business Rules V1 uses coverage against supplier lead time and "
+            f"sales observed during {window}; basis: Actual."
         )
 
     if capability == "inventory_health":
@@ -1452,6 +1588,7 @@ def build_answer(
                 f"{low} stock records are at or below their reorder level, "
                 f"{risk} have medium or high stockout risk, and {slow} are slow-moving. "
                 "These groups can overlap; see the table for the affected products and stores."
+                f"{_inventory_snapshot_text(df)} These are Actual inventory observations."
             )
 
     # ---------------------------------------------------------
@@ -1520,6 +1657,16 @@ def build_answer(
         )
 
         if answer:
+            if capability == "stockout_risk":
+                risk_column = "stockout_risk_v1" if "stockout_risk_v1" in df else "stockout_risk"
+                if risk_column in df.columns and df[risk_column].isin(["High", "Medium"]).any():
+                    answer += (
+                        " High/Medium risk follows Business Rules V1 using coverage "
+                        "against supplier lead time and sales observed during "
+                        f"{_sales_observation_window(df, rules)}. Basis: Actual."
+                    )
+                else:
+                    answer += f" Risk uses observed sales during {_sales_observation_window(df, rules)}. Basis: Actual."
             return answer
 
     # ---------------------------------------------------------
@@ -1527,7 +1674,21 @@ def build_answer(
     # ---------------------------------------------------------
 
     if question_kind == "lookup":
-
+        if list(getattr(intent, "metrics", []) or [])[:1] == ["inventory_value"] and "inventory_value" in df.columns:
+            counts = dict(df.attrs.get("result_counts", {}))
+            value = counts.get(
+                "inventory_value_total",
+                pd.to_numeric(df["inventory_value"], errors="coerce").sum(min_count=1),
+            )
+            positions = counts.get(
+                "product_store_positions",
+                len(df),
+            )
+            return (
+                f"Inventory value is {_inr(value)} across {positions} "
+                f"product-store positions {_inventory_scope_label(intent, df)}. "
+                f"Basis: {basis}."
+            )
         answer = _build_lookup_answer(
             intent,
             df,
@@ -1544,3 +1705,77 @@ def build_answer(
         intent,
         df,
     )
+
+
+def concise_leadership_answer(answer: str) -> str:
+    """Keep the user-facing response focused while retaining result caveats."""
+    text = str(answer or "").strip()
+    if not text:
+        return ""
+
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", text)
+        if sentence.strip()
+    ]
+    sentences = [
+        sentence for sentence in sentences
+        if not re.match(
+            r"^(?:examples?:|the table shows\b)",
+            sentence,
+            re.IGNORECASE,
+        )
+    ]
+    if len(sentences) <= 3 and len(text.split()) <= 60:
+        return " ".join(sentences)
+
+    caveat = re.compile(
+        r"\b(?:actual|simulated|simulation|not a forecast|"
+        r"business rules v1|observed sales|no recorded sales|zero-sales|"
+        r"weekly snapshot|not an exact|insufficient|unavailable)\b",
+        re.IGNORECASE,
+    )
+    selected = []
+    if sentences:
+        selected.append(sentences[0])
+    selected.extend(
+        sentence for sentence in sentences[1:]
+        if caveat.search(sentence) and sentence not in selected
+    )
+    selected = selected[:3]
+    for sentence in sentences[1:]:
+        if len(selected) == 3:
+            break
+        if sentence not in selected:
+            selected.append(sentence)
+
+    selected.sort(key=sentences.index)
+    concise = []
+    words = 0
+    for index, sentence in enumerate(selected):
+        count = len(sentence.split())
+        essential = bool(caveat.search(sentence))
+        if concise and words + count > 60 and not essential:
+            continue
+        concise.append(sentence)
+        words += count
+    return " ".join(concise)
+
+
+def build_answer(
+    *,
+    question: str,
+    intent,
+    df: pd.DataFrame,
+    basis: str = "Actual",
+    rules=None,
+) -> str:
+    """Build a concise, deterministic Leadership answer from calculated evidence."""
+    answer = _build_answer_unabridged(
+        question=question,
+        intent=intent,
+        df=df,
+        basis=basis,
+        rules=rules,
+    )
+    return concise_leadership_answer(answer)

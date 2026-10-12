@@ -91,7 +91,9 @@ def test_inventory_query_keeps_products_without_primary_supplier():
 
 def test_restrict_intersection():
     assert restrict([1, 2], [2, 3]) == [2]
-    assert restrict([], [2, 3]) == [2, 3]
+    assert restrict([], [2, 3]) == []
+    assert restrict([], None) == []
+    assert restrict(None, [2, 3]) == [2, 3]
     assert restrict(None, None) is None
     assert restrict([1], [2]) == []
 
@@ -105,7 +107,7 @@ def test_empty_ids_return_nothing(q):
         q.inventory_position(
             I, R, date(2026, 9, 30), [], None, prev_product_ids=[1]
         ).row_count
-        == 2
+        == 0
     )
     assert (
         q.inventory_position(
@@ -113,6 +115,76 @@ def test_empty_ids_return_nothing(q):
         ).row_count
         == 0
     )
+
+
+def test_inventory_position_applies_product_and_store_ids_in_sql(q):
+    class I:
+        time = None
+        group_by = []
+
+    result = q.inventory_position(I, R, date(2026, 9, 30), [1], [2])
+
+    assert result.df[["product_id", "store_id"]].to_records(index=False).tolist() == [(1, 2)]
+    assert "i.product_id IN (?)" in result.sql[0]
+    assert "i.store_id IN (?)" in result.sql[0]
+    assert result.params[0][-2:] == [1, 2]
+
+
+def test_slow_moving_and_no_sales_subtypes_filter_distinct_product_store_rows(q):
+    from app.llm.schema import Intent
+
+    q.conn.execute(
+        "INSERT INTO Sales VALUES (5, 'I4', '2026-09-20', 1, 2, 1, 100)"
+    )
+    base = dict(
+        capability="excess_slow_moving",
+        question_kind="ranking",
+        metrics=["sales_units"],
+        filters=Filters(stores=["S2"]),
+        group_by="product",
+    )
+    slow_intent = Intent(
+        **base, inventory_classification="slow_moving_candidate"
+    )
+    slow = dispatch(
+        q, slow_intent, BusinessRules(), date(2026, 9, 30), store_ids=[2]
+    ).df
+    assert slow[["product_id", "store_id", "units_sold_window"]].to_records(index=False).tolist() == [
+        (1, 2, 1),
+    ]
+
+    no_sales_intent = Intent(
+        **base, inventory_classification="no_recorded_sales"
+    )
+    no_sales = dispatch(
+        q, no_sales_intent, BusinessRules(), date(2026, 9, 30), store_ids=[2]
+    ).df
+    assert no_sales[["product_id", "store_id", "units_sold_window"]].to_records(index=False).tolist() == [
+        (2, 2, 0),
+    ]
+
+
+def test_legacy_excess_rule_remains_unchanged_when_subtype_is_null(q):
+    from app.llm.schema import Intent
+
+    intent = Intent(
+        capability="excess_slow_moving",
+        question_kind="ranking",
+        metrics=["quantity"],
+        filters=Filters(),
+    )
+
+    max_level = dispatch(
+        q, intent, BusinessRules(), date(2026, 9, 30), store_ids=[1],
+        excess_rule="max_level",
+    ).df
+    doi = dispatch(
+        q, intent, BusinessRules(), date(2026, 9, 30), store_ids=[1],
+        excess_rule="doi",
+    ).df
+
+    assert max_level["product_id"].tolist() == [1]
+    assert doi["product_id"].tolist() == [1, 2]
 
 
 def test_group_by_not_allowlisted(q):

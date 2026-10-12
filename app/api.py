@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from copy import copy
 from functools import lru_cache
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 import inspect
+import logging
 import os
 
-from fastapi import FastAPI, Cookie, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Cookie, HTTPException, Query as FastAPIQuery, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -19,13 +21,17 @@ from app.dispatch import dispatch
 from app.llm.client import GroqClient
 from app.narration import Narrator
 from app.orchestrator import Orchestrator
-from app.repository import load_catalog, load_rules
+from app.llm.schema import Intent
+from app.repository import ExploreRepository, load_catalog, load_rules
 from app.semantic.queries import Queries
 from app.semantic.resolver import EntityResolver
 from app.session import SessionMemory
 from app.context import UserContext, role_policy
 from app.history import ConversationStore, normalize_json_value
 from app.auth import AuthService
+
+
+logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
@@ -112,10 +118,14 @@ def _json_value(value: Any) -> Any:
 
 
 def _dataframe_records(df) -> list[dict[str, Any]]:
-    if df is None or df.empty:
+    if df is None:
         return []
-
-    records = df.to_dict(orient="records")
+    if hasattr(df, "to_dict"):
+        if df.empty:
+            return []
+        records = df.to_dict(orient="records")
+    else:
+        records = df
 
     return [
         {
@@ -152,17 +162,18 @@ def get_orchestrator() -> Orchestrator:
     """Create the production orchestrator once per application process."""
 
     settings = load_settings()
-
     conn = connect(settings)
-
-    rules = load_rules(conn)
-    products, stores = load_catalog(conn)
+    try:
+        rules = load_rules(conn)
+        products, stores = load_catalog(conn)
+    finally:
+        conn.close()
 
     resolver = EntityResolver(products, stores)
 
     queries = Queries(
         run=query,
-        conn=conn,
+        conn=None,
         schema="dbo.",
     )
 
@@ -187,15 +198,16 @@ def get_orchestrator() -> Orchestrator:
     # the reversible gate explicitly for a broader authorized environment.
     demo_only = os.getenv("LEADERSHIP_ONLY_DEMO", "1").strip().casefold() in {"1", "true", "yes", "on"}
     demo_account = os.getenv("LEADERSHIP_DEMO_ACCOUNT", "LD-01").strip() or "LD-01"
-    orchestrator.auth_service = AuthService(
-        conn,
-        demo_only=demo_only,
-        demo_account=demo_account,
-    )
+    orchestrator.auth_demo_only = demo_only
+    orchestrator.auth_demo_account = demo_account
     return orchestrator
 
 
-def create_app(orchestrator_provider=get_orchestrator, conversation_store: ConversationStore | None = None) -> FastAPI:
+def create_app(
+    orchestrator_provider=get_orchestrator,
+    conversation_store: ConversationStore | None = None,
+    connection_factory: Callable[[], Any] | None = None,
+) -> FastAPI:
     app = FastAPI(
         title="Inventory AI Assistant",
         description="Conversational inventory analytics API",
@@ -204,23 +216,47 @@ def create_app(orchestrator_provider=get_orchestrator, conversation_store: Conve
     store = conversation_store or ConversationStore()
     auth_required = orchestrator_provider is get_orchestrator
 
-    def auth_service() -> AuthService | None:
-        try:
-            orchestrator = orchestrator_provider()
-            service = getattr(orchestrator, "auth_service", None)
-            if service is not None:
-                return service
-            conn = getattr(getattr(orchestrator, "queries", None), "conn", None)
-            if conn is not None:
-                service = AuthService(conn)
-                setattr(orchestrator, "auth_service", service)
-                return service
-        except Exception:
-            return None
-        return None
+    def request_orchestrator():
+        """Bind one database connection to all database work for this request."""
+        base = orchestrator_provider()
+        if not auth_required and connection_factory is None:
+            yield base
+            return
 
-    def current_scope(session_token: str | None):
-        service = auth_service()
+        conn = connection_factory() if connection_factory else connect(load_settings())
+        try:
+            scoped = copy(base)
+            queries = getattr(base, "queries", None)
+            if queries is not None:
+                scoped_queries = copy(queries)
+                scoped_queries.conn = conn
+                scoped.queries = scoped_queries
+
+            if auth_required:
+                scoped.auth_service = AuthService(
+                    conn,
+                    demo_only=getattr(base, "auth_demo_only", False),
+                    demo_account=getattr(base, "auth_demo_account", "LD-01"),
+                )
+            else:
+                service = getattr(base, "auth_service", None)
+                if service is not None and hasattr(service, "conn"):
+                    scoped_service = copy(service)
+                    scoped_service.conn = conn
+                    scoped.auth_service = scoped_service
+            yield scoped
+        finally:
+            conn.close()
+
+    def auth_service(orchestrator) -> AuthService | None:
+        service = getattr(orchestrator, "auth_service", None)
+        if service is not None:
+            return service
+        conn = getattr(getattr(orchestrator, "queries", None), "conn", None)
+        return AuthService(conn) if conn is not None else None
+
+    def current_scope(session_token: str | None, orchestrator):
+        service = auth_service(orchestrator)
         if service is None:
             if auth_required:
                 raise HTTPException(status_code=503, detail="Authentication service unavailable")
@@ -231,8 +267,13 @@ def create_app(orchestrator_provider=get_orchestrator, conversation_store: Conve
         return service.scope(user)
 
     @app.post("/auth/login")
-    def login(request: LoginRequest, response: Response, http_request: Request):
-        service = auth_service()
+    def login(
+        request: LoginRequest,
+        response: Response,
+        http_request: Request,
+        orchestrator=Depends(request_orchestrator),
+    ):
+        service = auth_service(orchestrator)
         if service is None:
             raise HTTPException(status_code=503, detail="Authentication service unavailable")
         try:
@@ -261,8 +302,12 @@ def create_app(orchestrator_provider=get_orchestrator, conversation_store: Conve
         }
 
     @app.post("/auth/logout")
-    def logout(response: Response, session_token: str | None = Cookie(default=None, alias="inventory_session")):
-        service = auth_service()
+    def logout(
+        response: Response,
+        session_token: str | None = Cookie(default=None, alias="inventory_session"),
+        orchestrator=Depends(request_orchestrator),
+    ):
+        service = auth_service(orchestrator)
         if service is None and auth_required:
             raise HTTPException(status_code=503, detail="Authentication service unavailable")
         if service is not None:
@@ -271,8 +316,11 @@ def create_app(orchestrator_provider=get_orchestrator, conversation_store: Conve
         return {"status": "ok"}
 
     @app.get("/auth/me")
-    def me(session_token: str | None = Cookie(default=None, alias="inventory_session")):
-        scope = current_scope(session_token)
+    def me(
+        session_token: str | None = Cookie(default=None, alias="inventory_session"),
+        orchestrator=Depends(request_orchestrator),
+    ):
+        scope = current_scope(session_token, orchestrator)
         role = scope.user.role_code
         return {
             "user_id": scope.user.user_id,
@@ -304,11 +352,72 @@ def create_app(orchestrator_provider=get_orchestrator, conversation_store: Conve
             "service": "inventory-ai-assistant",
         }
 
+    def explore_repository(session_token: str | None, orchestrator):
+        scope = current_scope(session_token, orchestrator)
+        if scope is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        queries = getattr(orchestrator, "queries", None)
+        if queries is None or not all(hasattr(queries, name) for name in ("run", "conn", "s")):
+            raise HTTPException(status_code=503, detail="Explore Data is unavailable")
+        return scope, ExploreRepository(queries.run, queries.conn, schema=queries.s)
+
+    @app.get("/explore/products")
+    def explore_products(
+        search: str = FastAPIQuery(default="", max_length=100),
+        brand: str | None = FastAPIQuery(default=None, max_length=100),
+        category: str | None = FastAPIQuery(default=None, max_length=100),
+        subcategory: str | None = FastAPIQuery(default=None, max_length=100),
+        page: int = FastAPIQuery(default=1, ge=1),
+        page_size: int = FastAPIQuery(default=25, ge=1, le=100),
+        session_token: str | None = Cookie(default=None, alias="inventory_session"),
+        orchestrator=Depends(request_orchestrator),
+    ) -> dict[str, Any]:
+        scope, repository = explore_repository(session_token, orchestrator)
+        result = repository.products(
+            scope,
+            search=search.strip(),
+            brand=brand.strip() if brand else None,
+            category=category.strip() if category else None,
+            subcategory=subcategory.strip() if subcategory else None,
+            page=page,
+            page_size=page_size,
+        )
+        result["items"] = _dataframe_records(result["items"])
+        return result
+
+    @app.get("/explore/filters")
+    def explore_filters(
+        session_token: str | None = Cookie(default=None, alias="inventory_session"),
+        orchestrator=Depends(request_orchestrator),
+    ) -> dict[str, list[str]]:
+        scope, repository = explore_repository(session_token, orchestrator)
+        return repository.filters(scope)
+
+    @app.get("/explore/locations")
+    def explore_locations(
+        session_token: str | None = Cookie(default=None, alias="inventory_session"),
+        orchestrator=Depends(request_orchestrator),
+    ) -> dict[str, Any]:
+        scope, repository = explore_repository(session_token, orchestrator)
+        return {"items": _dataframe_records(repository.locations(scope))}
+
+    @app.get("/explore/availability")
+    def explore_availability(
+        session_token: str | None = Cookie(default=None, alias="inventory_session"),
+        orchestrator=Depends(request_orchestrator),
+    ) -> dict[str, Any]:
+        scope, repository = explore_repository(session_token, orchestrator)
+        return _json_value(repository.availability(scope))
+
     @app.post("/chat", response_model=ChatResponse)
-    def chat(request: ChatRequest, session_token: str | None = Cookie(default=None, alias="inventory_session")) -> ChatResponse:
+    def chat(
+        request: ChatRequest,
+        session_token: str | None = Cookie(default=None, alias="inventory_session"),
+        orchestrator=Depends(request_orchestrator),
+    ) -> ChatResponse:
         conversation_id = request.conversation_id or request.session_id or f"session-{uuid4().hex[:12]}"
         session_id = request.session_id or conversation_id
-        scope = current_scope(session_token)
+        scope = current_scope(session_token, orchestrator)
         if scope is None:
             context = UserContext(user_id=request.user_id, display_name=request.display_name, persona=request.persona)
         else:
@@ -316,8 +425,6 @@ def create_app(orchestrator_provider=get_orchestrator, conversation_store: Conve
         store.ensure_conversation(context.user_id, context.display_name, context.persona, conversation_id)
         store.add_message(conversation_id, "user", request.question)
         store.set_title_if_new(conversation_id, request.question)
-
-        orchestrator = orchestrator_provider()
 
         # Restore a pending clarification from the existing transcript store
         # when the process/session memory was recreated. This metadata is
@@ -327,6 +434,40 @@ def create_app(orchestrator_provider=get_orchestrator, conversation_store: Conve
             pending_state = store.latest_pending(context.user_id, conversation_id)
             if pending_state and hasattr(sessions, "set_pending"):
                 sessions.set_pending(session_id, pending_state)
+        if (
+            sessions is not None
+            and hasattr(sessions, "get")
+            and getattr(sessions.get(session_id), "last_intent", None) is None
+        ):
+            for message in reversed(store.messages(context.user_id, conversation_id)):
+                if message.get("role") != "assistant":
+                    continue
+                metadata = message.get("metadata") or {}
+                intent_data = metadata.get("intent")
+                resolved_context = metadata.get("resolved_context") or {}
+                if metadata.get("status") != "ok" or not isinstance(intent_data, dict):
+                    continue
+                try:
+                    restored_intent = Intent.model_validate(intent_data)
+                    product_scope = resolved_context.get("product_scope") or {}
+                    location_scope = resolved_context.get("location_scope") or {}
+                    sessions.update(
+                        session_id,
+                        intent=restored_intent,
+                        intent_summary=(
+                            f"capability={restored_intent.capability}; "
+                            f"metrics={','.join(restored_intent.metrics)}"
+                        ),
+                        product_ids=product_scope.get("product_ids"),
+                        store_ids=location_scope.get("store_ids"),
+                        basis=str(metadata.get("basis") or "Actual"),
+                    )
+                    break
+                except (TypeError, ValueError) as exc:
+                    logger.warning(
+                        "Skipping invalid persisted conversation context (%s)",
+                        type(exc).__name__,
+                    )
 
         kwargs = {"question": request.question, "session_id": session_id}
         if "user_context" in inspect.signature(orchestrator.handle).parameters:
@@ -413,22 +554,37 @@ def create_app(orchestrator_provider=get_orchestrator, conversation_store: Conve
         return normalized_response
 
     @app.get("/conversations/{user_id}")
-    def conversations(user_id: str, session_token: str | None = Cookie(default=None, alias="inventory_session")) -> dict[str, Any]:
-        scope = current_scope(session_token)
+    def conversations(
+        user_id: str,
+        session_token: str | None = Cookie(default=None, alias="inventory_session"),
+        orchestrator=Depends(request_orchestrator),
+    ) -> dict[str, Any]:
+        scope = current_scope(session_token, orchestrator)
         if scope is not None and str(scope.user.user_id) != user_id and scope.user.username != user_id:
             raise HTTPException(status_code=403, detail="Conversation access denied")
         return {"conversations": store.recents(user_id)}
 
     @app.get("/conversations/{user_id}/{conversation_id}")
-    def conversation(user_id: str, conversation_id: str, session_token: str | None = Cookie(default=None, alias="inventory_session")) -> dict[str, Any]:
-        scope = current_scope(session_token)
+    def conversation(
+        user_id: str,
+        conversation_id: str,
+        session_token: str | None = Cookie(default=None, alias="inventory_session"),
+        orchestrator=Depends(request_orchestrator),
+    ) -> dict[str, Any]:
+        scope = current_scope(session_token, orchestrator)
         if scope is not None and str(scope.user.user_id) != user_id and scope.user.username != user_id:
             raise HTTPException(status_code=403, detail="Conversation access denied")
         return {"conversation_id": conversation_id, "messages": store.messages(user_id, conversation_id)}
 
     @app.patch("/conversations/{user_id}/{conversation_id}")
-    def rename_conversation(user_id: str, conversation_id: str, payload: dict[str, str], session_token: str | None = Cookie(default=None, alias="inventory_session")) -> dict[str, Any]:
-        scope = current_scope(session_token)
+    def rename_conversation(
+        user_id: str,
+        conversation_id: str,
+        payload: dict[str, str],
+        session_token: str | None = Cookie(default=None, alias="inventory_session"),
+        orchestrator=Depends(request_orchestrator),
+    ) -> dict[str, Any]:
+        scope = current_scope(session_token, orchestrator)
         if scope is not None and str(scope.user.user_id) != user_id and scope.user.username != user_id:
             raise HTTPException(status_code=403, detail="Conversation access denied")
         title = str(payload.get("title", ""))
@@ -437,8 +593,13 @@ def create_app(orchestrator_provider=get_orchestrator, conversation_store: Conve
         return {"status": "ok", "conversation_id": conversation_id, "title": title.strip()}
 
     @app.delete("/conversations/{user_id}/{conversation_id}")
-    def delete_conversation(user_id: str, conversation_id: str, session_token: str | None = Cookie(default=None, alias="inventory_session")) -> dict[str, Any]:
-        scope = current_scope(session_token)
+    def delete_conversation(
+        user_id: str,
+        conversation_id: str,
+        session_token: str | None = Cookie(default=None, alias="inventory_session"),
+        orchestrator=Depends(request_orchestrator),
+    ) -> dict[str, Any]:
+        scope = current_scope(session_token, orchestrator)
         if scope is not None and str(scope.user.user_id) != user_id and scope.user.username != user_id:
             raise HTTPException(status_code=403, detail="Conversation access denied")
         return {"status": "ok" if store.delete(user_id, conversation_id) else "not_found"}

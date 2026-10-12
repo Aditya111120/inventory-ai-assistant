@@ -102,6 +102,23 @@ def test_brand_case_insensitive_and_counts(r):
     assert r.resolve(Filters(brands=["BOAT"])).matches[0].label == "boAt"
 
 
+def test_explicit_filter_mentions_are_catalog_backed_across_dimensions(r):
+    mentions = r.explicit_filter_mentions(
+        "What about Lenovo Laptop LEN-LAP-1 in Mumbai at Bandra?"
+    )
+
+    assert mentions.brands == ["Lenovo"]
+    assert mentions.products == ["Lenovo Laptop LEN-LAP-1"]
+    assert mentions.cities == ["Mumbai"]
+    assert mentions.stores == ["Bandra"]
+
+
+def test_explicit_category_alias_is_grounded_to_catalog_category(r):
+    mentions = r.explicit_filter_mentions("What about laptops?")
+
+    assert mentions.categories == ["Laptops"]
+
+
 def test_brand_and_category_are_anded_within_field_ored(r):
     x = r.resolve(Filters(brands=["Samsung", "LG"], categories=["TV"]))
     got = r.prods[r.prods.product_id.isin(x.product_ids)]

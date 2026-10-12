@@ -1,0 +1,1147 @@
+{
+  "classification_loaded": false,
+  "post_validation": {
+    "result_sets": [
+      {
+        "columns": [
+          "database_name",
+          "server_name",
+          "sql_server_version"
+        ],
+        "rows": [
+          {
+            "database_name": "InventoryAI_Test",
+            "server_name": "SWGL056\\SQLEXPRESS01",
+            "sql_server_version": "Microsoft SQL Server 2025 (RTM-GDR) (KB5122770) - 17.0.1135.8 (X64) \n\tAug 20 2026 00:56:11 \n\tCopyright (C) 2025 Microsoft Corporation\n\tExpress Edition (64-bit) on Windows 10 Pro 10.0 <X64> (Build 26300: ) (Hypervisor)\n"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "table_name",
+          "row_count"
+        ],
+        "rows": [
+          {
+            "row_count": 150,
+            "table_name": "Products"
+          },
+          {
+            "row_count": 2400,
+            "table_name": "Inventory"
+          },
+          {
+            "row_count": 120000,
+            "table_name": "Sales"
+          },
+          {
+            "row_count": 180,
+            "table_name": "SupplierProducts"
+          },
+          {
+            "row_count": 1590,
+            "table_name": "PurchaseOrders"
+          },
+          {
+            "row_count": 62400,
+            "table_name": "InventorySnapshotWeekly"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "product_id_sku_sha256",
+          "product_catalog_sha256"
+        ],
+        "rows": [
+          {
+            "product_catalog_sha256": "feb95e45c712e7ae38ebfb8de11194bbdc2c8ffc52c52de46fbfd1c98e5c3867",
+            "product_id_sku_sha256": "3cc0c4f694dcefe687336758462ced71ac1311dd7017df4a2d374d9ff8ea9200"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "table_name",
+          "row_count",
+          "quantity_sum",
+          "reorder_sum",
+          "max_level_sum",
+          "first_date",
+          "last_date"
+        ],
+        "rows": [
+          {
+            "first_date": "2026-09-30",
+            "last_date": "2026-09-30",
+            "max_level_sum": 27009,
+            "quantity_sum": 41404,
+            "reorder_sum": 9003,
+            "row_count": 2400,
+            "table_name": "Inventory"
+          },
+          {
+            "first_date": "2026-04-08",
+            "last_date": "2026-09-30",
+            "max_level_sum": null,
+            "quantity_sum": 1122229,
+            "reorder_sum": null,
+            "row_count": 62400,
+            "table_name": "InventorySnapshotWeekly"
+          },
+          {
+            "first_date": "2025-10-01",
+            "last_date": "2026-09-30",
+            "max_level_sum": null,
+            "quantity_sum": 159133,
+            "reorder_sum": null,
+            "row_count": 120000,
+            "table_name": "Sales"
+          },
+          {
+            "first_date": null,
+            "last_date": null,
+            "max_level_sum": null,
+            "quantity_sum": 2229,
+            "reorder_sum": null,
+            "row_count": 180,
+            "table_name": "SupplierProducts"
+          },
+          {
+            "first_date": "2026-04-04",
+            "last_date": "2026-09-30",
+            "max_level_sum": null,
+            "quantity_sum": 419591,
+            "reorder_sum": null,
+            "row_count": 1590,
+            "table_name": "PurchaseOrders"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "table_name",
+          "revenue_sum"
+        ],
+        "rows": [
+          {
+            "revenue_sum": "9752375010.00",
+            "table_name": "Sales"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "column_name",
+          "data_type",
+          "max_length",
+          "is_nullable",
+          "is_identity"
+        ],
+        "rows": [
+          {
+            "column_name": "product_id",
+            "data_type": "int",
+            "is_identity": true,
+            "is_nullable": false,
+            "max_length": 4
+          },
+          {
+            "column_name": "sku",
+            "data_type": "varchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 20
+          },
+          {
+            "column_name": "product_name",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 300
+          },
+          {
+            "column_name": "brand",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 100
+          },
+          {
+            "column_name": "category",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 100
+          },
+          {
+            "column_name": "model",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 100
+          },
+          {
+            "column_name": "launch_date",
+            "data_type": "date",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 3
+          },
+          {
+            "column_name": "cost_price",
+            "data_type": "decimal",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 9
+          },
+          {
+            "column_name": "selling_price",
+            "data_type": "decimal",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 9
+          },
+          {
+            "column_name": "is_active",
+            "data_type": "bit",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 1
+          },
+          {
+            "column_name": "subcategory_id",
+            "data_type": "smallint",
+            "is_identity": false,
+            "is_nullable": true,
+            "max_length": 2
+          }
+        ]
+      },
+      {
+        "columns": [
+          "index_name",
+          "type_desc",
+          "is_unique",
+          "is_primary_key",
+          "key_ordinal",
+          "column_name"
+        ],
+        "rows": [
+          {
+            "column_name": "subcategory_id",
+            "index_name": "IX_Products_subcategory_id",
+            "is_primary_key": false,
+            "is_unique": false,
+            "key_ordinal": 1,
+            "type_desc": "NONCLUSTERED"
+          },
+          {
+            "column_name": "product_id",
+            "index_name": "PK__Products__47027DF59E535551",
+            "is_primary_key": true,
+            "is_unique": true,
+            "key_ordinal": 1,
+            "type_desc": "CLUSTERED"
+          },
+          {
+            "column_name": "sku",
+            "index_name": "UX_Products_sku",
+            "is_primary_key": false,
+            "is_unique": true,
+            "key_ordinal": 1,
+            "type_desc": "NONCLUSTERED"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "foreign_key_name",
+          "child_table",
+          "parent_table",
+          "is_disabled",
+          "is_not_trusted",
+          "child_column",
+          "parent_column",
+          "column_ordinal"
+        ],
+        "rows": [
+          {
+            "child_column": "product_id",
+            "child_table": "Inventory",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK__Inventory__produ__68487DD7",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "product_id",
+            "parent_table": "Products"
+          },
+          {
+            "child_column": "product_id",
+            "child_table": "InventorySnapshotWeekly",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK__Inventory__produ__6C190EBB",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "product_id",
+            "parent_table": "Products"
+          },
+          {
+            "child_column": "product_id",
+            "child_table": "PurchaseOrders",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK__PurchaseO__produ__73BA3083",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "product_id",
+            "parent_table": "Products"
+          },
+          {
+            "child_column": "product_id",
+            "child_table": "Sales",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK__Sales__product_i__6FE99F9F",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "product_id",
+            "parent_table": "Products"
+          },
+          {
+            "child_column": "product_id",
+            "child_table": "SupplierProducts",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK__SupplierP__produ__656C112C",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "product_id",
+            "parent_table": "Products"
+          },
+          {
+            "child_column": "subcategory_id",
+            "child_table": "Products",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK_Products_ProductSubcategories",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "subcategory_id",
+            "parent_table": "ProductSubcategories"
+          },
+          {
+            "child_column": "category",
+            "child_table": "Products",
+            "column_ordinal": 2,
+            "foreign_key_name": "FK_Products_ProductSubcategories",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "category",
+            "parent_table": "ProductSubcategories"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "table_name",
+          "orphan_rows"
+        ],
+        "rows": [
+          {
+            "orphan_rows": 0,
+            "table_name": "Inventory"
+          },
+          {
+            "orphan_rows": 0,
+            "table_name": "InventorySnapshotWeekly"
+          },
+          {
+            "orphan_rows": 0,
+            "table_name": "Sales"
+          },
+          {
+            "orphan_rows": 0,
+            "table_name": "SupplierProducts"
+          },
+          {
+            "orphan_rows": 0,
+            "table_name": "PurchaseOrders"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "relationship",
+          "orphan_rows"
+        ],
+        "rows": [
+          {
+            "orphan_rows": 0,
+            "relationship": "SupplierProducts.supplier_id"
+          },
+          {
+            "orphan_rows": 0,
+            "relationship": "PurchaseOrders.supplier_id"
+          },
+          {
+            "orphan_rows": 0,
+            "relationship": "Inventory.store_id"
+          },
+          {
+            "orphan_rows": 0,
+            "relationship": "InventorySnapshotWeekly.store_id"
+          },
+          {
+            "orphan_rows": 0,
+            "relationship": "Sales.store_id"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "duplicate_product_ids"
+        ],
+        "rows": [
+          {
+            "duplicate_product_ids": 0
+          }
+        ]
+      },
+      {
+        "columns": [
+          "duplicate_skus"
+        ],
+        "rows": [
+          {
+            "duplicate_skus": 0
+          }
+        ]
+      },
+      {
+        "columns": [
+          "migration_state"
+        ],
+        "rows": [
+          {
+            "migration_state": "installed"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "column_name",
+          "data_type",
+          "max_length",
+          "is_nullable",
+          "is_identity"
+        ],
+        "rows": [
+          {
+            "column_name": "subcategory_id",
+            "data_type": "smallint",
+            "is_identity": true,
+            "is_nullable": false,
+            "max_length": 2
+          },
+          {
+            "column_name": "category",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 100
+          },
+          {
+            "column_name": "subcategory_name",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 200
+          }
+        ]
+      },
+      {
+        "columns": [
+          "index_name",
+          "is_unique",
+          "is_primary_key",
+          "key_ordinal",
+          "column_name"
+        ],
+        "rows": [
+          {
+            "column_name": "subcategory_id",
+            "index_name": "PK_ProductSubcategories",
+            "is_primary_key": true,
+            "is_unique": true,
+            "key_ordinal": 1
+          },
+          {
+            "column_name": "category",
+            "index_name": "UQ_ProductSubcategories_CategoryName",
+            "is_primary_key": false,
+            "is_unique": true,
+            "key_ordinal": 1
+          },
+          {
+            "column_name": "subcategory_name",
+            "index_name": "UQ_ProductSubcategories_CategoryName",
+            "is_primary_key": false,
+            "is_unique": true,
+            "key_ordinal": 2
+          },
+          {
+            "column_name": "subcategory_id",
+            "index_name": "UQ_ProductSubcategories_IdCategory",
+            "is_primary_key": false,
+            "is_unique": true,
+            "key_ordinal": 1
+          },
+          {
+            "column_name": "category",
+            "index_name": "UQ_ProductSubcategories_IdCategory",
+            "is_primary_key": false,
+            "is_unique": true,
+            "key_ordinal": 2
+          }
+        ]
+      },
+      {
+        "columns": [
+          "foreign_key_name",
+          "child_table",
+          "parent_table",
+          "child_column",
+          "parent_column",
+          "column_ordinal"
+        ],
+        "rows": [
+          {
+            "child_column": "subcategory_id",
+            "child_table": "Products",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK_Products_ProductSubcategories",
+            "parent_column": "subcategory_id",
+            "parent_table": "ProductSubcategories"
+          },
+          {
+            "child_column": "category",
+            "child_table": "Products",
+            "column_ordinal": 2,
+            "foreign_key_name": "FK_Products_ProductSubcategories",
+            "parent_column": "category",
+            "parent_table": "ProductSubcategories"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "product_id",
+          "sku",
+          "category",
+          "subcategory_id"
+        ],
+        "rows": []
+      },
+      {
+        "columns": [
+          "product_id",
+          "sku",
+          "subcategory_id",
+          "subcategory_parent"
+        ],
+        "rows": []
+      },
+      {
+        "columns": [
+          "assigned_products"
+        ],
+        "rows": [
+          {
+            "assigned_products": 0
+          }
+        ]
+      },
+      {
+        "columns": [
+          "product_id",
+          "sku",
+          "product_name",
+          "brand",
+          "category",
+          "model"
+        ],
+        "rows": []
+      }
+    ]
+  },
+  "pre_validation": {
+    "result_sets": [
+      {
+        "columns": [
+          "database_name",
+          "server_name",
+          "sql_server_version"
+        ],
+        "rows": [
+          {
+            "database_name": "InventoryAI_Test",
+            "server_name": "SWGL056\\SQLEXPRESS01",
+            "sql_server_version": "Microsoft SQL Server 2025 (RTM-GDR) (KB5122770) - 17.0.1135.8 (X64) \n\tAug 20 2026 00:56:11 \n\tCopyright (C) 2025 Microsoft Corporation\n\tExpress Edition (64-bit) on Windows 10 Pro 10.0 <X64> (Build 26300: ) (Hypervisor)\n"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "table_name",
+          "row_count"
+        ],
+        "rows": [
+          {
+            "row_count": 150,
+            "table_name": "Products"
+          },
+          {
+            "row_count": 2400,
+            "table_name": "Inventory"
+          },
+          {
+            "row_count": 120000,
+            "table_name": "Sales"
+          },
+          {
+            "row_count": 180,
+            "table_name": "SupplierProducts"
+          },
+          {
+            "row_count": 1590,
+            "table_name": "PurchaseOrders"
+          },
+          {
+            "row_count": 62400,
+            "table_name": "InventorySnapshotWeekly"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "product_id_sku_sha256",
+          "product_catalog_sha256"
+        ],
+        "rows": [
+          {
+            "product_catalog_sha256": "feb95e45c712e7ae38ebfb8de11194bbdc2c8ffc52c52de46fbfd1c98e5c3867",
+            "product_id_sku_sha256": "3cc0c4f694dcefe687336758462ced71ac1311dd7017df4a2d374d9ff8ea9200"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "table_name",
+          "row_count",
+          "quantity_sum",
+          "reorder_sum",
+          "max_level_sum",
+          "first_date",
+          "last_date"
+        ],
+        "rows": [
+          {
+            "first_date": "2026-09-30",
+            "last_date": "2026-09-30",
+            "max_level_sum": 27009,
+            "quantity_sum": 41404,
+            "reorder_sum": 9003,
+            "row_count": 2400,
+            "table_name": "Inventory"
+          },
+          {
+            "first_date": "2026-04-08",
+            "last_date": "2026-09-30",
+            "max_level_sum": null,
+            "quantity_sum": 1122229,
+            "reorder_sum": null,
+            "row_count": 62400,
+            "table_name": "InventorySnapshotWeekly"
+          },
+          {
+            "first_date": "2025-10-01",
+            "last_date": "2026-09-30",
+            "max_level_sum": null,
+            "quantity_sum": 159133,
+            "reorder_sum": null,
+            "row_count": 120000,
+            "table_name": "Sales"
+          },
+          {
+            "first_date": null,
+            "last_date": null,
+            "max_level_sum": null,
+            "quantity_sum": 2229,
+            "reorder_sum": null,
+            "row_count": 180,
+            "table_name": "SupplierProducts"
+          },
+          {
+            "first_date": "2026-04-04",
+            "last_date": "2026-09-30",
+            "max_level_sum": null,
+            "quantity_sum": 419591,
+            "reorder_sum": null,
+            "row_count": 1590,
+            "table_name": "PurchaseOrders"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "table_name",
+          "revenue_sum"
+        ],
+        "rows": [
+          {
+            "revenue_sum": "9752375010.00",
+            "table_name": "Sales"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "column_name",
+          "data_type",
+          "max_length",
+          "is_nullable",
+          "is_identity"
+        ],
+        "rows": [
+          {
+            "column_name": "product_id",
+            "data_type": "int",
+            "is_identity": true,
+            "is_nullable": false,
+            "max_length": 4
+          },
+          {
+            "column_name": "sku",
+            "data_type": "varchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 20
+          },
+          {
+            "column_name": "product_name",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 300
+          },
+          {
+            "column_name": "brand",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 100
+          },
+          {
+            "column_name": "category",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 100
+          },
+          {
+            "column_name": "model",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 100
+          },
+          {
+            "column_name": "launch_date",
+            "data_type": "date",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 3
+          },
+          {
+            "column_name": "cost_price",
+            "data_type": "decimal",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 9
+          },
+          {
+            "column_name": "selling_price",
+            "data_type": "decimal",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 9
+          },
+          {
+            "column_name": "is_active",
+            "data_type": "bit",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 1
+          },
+          {
+            "column_name": "subcategory_id",
+            "data_type": "smallint",
+            "is_identity": false,
+            "is_nullable": true,
+            "max_length": 2
+          }
+        ]
+      },
+      {
+        "columns": [
+          "index_name",
+          "type_desc",
+          "is_unique",
+          "is_primary_key",
+          "key_ordinal",
+          "column_name"
+        ],
+        "rows": [
+          {
+            "column_name": "subcategory_id",
+            "index_name": "IX_Products_subcategory_id",
+            "is_primary_key": false,
+            "is_unique": false,
+            "key_ordinal": 1,
+            "type_desc": "NONCLUSTERED"
+          },
+          {
+            "column_name": "product_id",
+            "index_name": "PK__Products__47027DF59E535551",
+            "is_primary_key": true,
+            "is_unique": true,
+            "key_ordinal": 1,
+            "type_desc": "CLUSTERED"
+          },
+          {
+            "column_name": "sku",
+            "index_name": "UX_Products_sku",
+            "is_primary_key": false,
+            "is_unique": true,
+            "key_ordinal": 1,
+            "type_desc": "NONCLUSTERED"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "foreign_key_name",
+          "child_table",
+          "parent_table",
+          "is_disabled",
+          "is_not_trusted",
+          "child_column",
+          "parent_column",
+          "column_ordinal"
+        ],
+        "rows": [
+          {
+            "child_column": "product_id",
+            "child_table": "Inventory",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK__Inventory__produ__68487DD7",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "product_id",
+            "parent_table": "Products"
+          },
+          {
+            "child_column": "product_id",
+            "child_table": "InventorySnapshotWeekly",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK__Inventory__produ__6C190EBB",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "product_id",
+            "parent_table": "Products"
+          },
+          {
+            "child_column": "product_id",
+            "child_table": "PurchaseOrders",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK__PurchaseO__produ__73BA3083",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "product_id",
+            "parent_table": "Products"
+          },
+          {
+            "child_column": "product_id",
+            "child_table": "Sales",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK__Sales__product_i__6FE99F9F",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "product_id",
+            "parent_table": "Products"
+          },
+          {
+            "child_column": "product_id",
+            "child_table": "SupplierProducts",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK__SupplierP__produ__656C112C",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "product_id",
+            "parent_table": "Products"
+          },
+          {
+            "child_column": "subcategory_id",
+            "child_table": "Products",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK_Products_ProductSubcategories",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "subcategory_id",
+            "parent_table": "ProductSubcategories"
+          },
+          {
+            "child_column": "category",
+            "child_table": "Products",
+            "column_ordinal": 2,
+            "foreign_key_name": "FK_Products_ProductSubcategories",
+            "is_disabled": false,
+            "is_not_trusted": false,
+            "parent_column": "category",
+            "parent_table": "ProductSubcategories"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "table_name",
+          "orphan_rows"
+        ],
+        "rows": [
+          {
+            "orphan_rows": 0,
+            "table_name": "Inventory"
+          },
+          {
+            "orphan_rows": 0,
+            "table_name": "InventorySnapshotWeekly"
+          },
+          {
+            "orphan_rows": 0,
+            "table_name": "Sales"
+          },
+          {
+            "orphan_rows": 0,
+            "table_name": "SupplierProducts"
+          },
+          {
+            "orphan_rows": 0,
+            "table_name": "PurchaseOrders"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "relationship",
+          "orphan_rows"
+        ],
+        "rows": [
+          {
+            "orphan_rows": 0,
+            "relationship": "SupplierProducts.supplier_id"
+          },
+          {
+            "orphan_rows": 0,
+            "relationship": "PurchaseOrders.supplier_id"
+          },
+          {
+            "orphan_rows": 0,
+            "relationship": "Inventory.store_id"
+          },
+          {
+            "orphan_rows": 0,
+            "relationship": "InventorySnapshotWeekly.store_id"
+          },
+          {
+            "orphan_rows": 0,
+            "relationship": "Sales.store_id"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "duplicate_product_ids"
+        ],
+        "rows": [
+          {
+            "duplicate_product_ids": 0
+          }
+        ]
+      },
+      {
+        "columns": [
+          "duplicate_skus"
+        ],
+        "rows": [
+          {
+            "duplicate_skus": 0
+          }
+        ]
+      },
+      {
+        "columns": [
+          "migration_state"
+        ],
+        "rows": [
+          {
+            "migration_state": "installed"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "column_name",
+          "data_type",
+          "max_length",
+          "is_nullable",
+          "is_identity"
+        ],
+        "rows": [
+          {
+            "column_name": "subcategory_id",
+            "data_type": "smallint",
+            "is_identity": true,
+            "is_nullable": false,
+            "max_length": 2
+          },
+          {
+            "column_name": "category",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 100
+          },
+          {
+            "column_name": "subcategory_name",
+            "data_type": "nvarchar",
+            "is_identity": false,
+            "is_nullable": false,
+            "max_length": 200
+          }
+        ]
+      },
+      {
+        "columns": [
+          "index_name",
+          "is_unique",
+          "is_primary_key",
+          "key_ordinal",
+          "column_name"
+        ],
+        "rows": [
+          {
+            "column_name": "subcategory_id",
+            "index_name": "PK_ProductSubcategories",
+            "is_primary_key": true,
+            "is_unique": true,
+            "key_ordinal": 1
+          },
+          {
+            "column_name": "category",
+            "index_name": "UQ_ProductSubcategories_CategoryName",
+            "is_primary_key": false,
+            "is_unique": true,
+            "key_ordinal": 1
+          },
+          {
+            "column_name": "subcategory_name",
+            "index_name": "UQ_ProductSubcategories_CategoryName",
+            "is_primary_key": false,
+            "is_unique": true,
+            "key_ordinal": 2
+          },
+          {
+            "column_name": "subcategory_id",
+            "index_name": "UQ_ProductSubcategories_IdCategory",
+            "is_primary_key": false,
+            "is_unique": true,
+            "key_ordinal": 1
+          },
+          {
+            "column_name": "category",
+            "index_name": "UQ_ProductSubcategories_IdCategory",
+            "is_primary_key": false,
+            "is_unique": true,
+            "key_ordinal": 2
+          }
+        ]
+      },
+      {
+        "columns": [
+          "foreign_key_name",
+          "child_table",
+          "parent_table",
+          "child_column",
+          "parent_column",
+          "column_ordinal"
+        ],
+        "rows": [
+          {
+            "child_column": "subcategory_id",
+            "child_table": "Products",
+            "column_ordinal": 1,
+            "foreign_key_name": "FK_Products_ProductSubcategories",
+            "parent_column": "subcategory_id",
+            "parent_table": "ProductSubcategories"
+          },
+          {
+            "child_column": "category",
+            "child_table": "Products",
+            "column_ordinal": 2,
+            "foreign_key_name": "FK_Products_ProductSubcategories",
+            "parent_column": "category",
+            "parent_table": "ProductSubcategories"
+          }
+        ]
+      },
+      {
+        "columns": [
+          "product_id",
+          "sku",
+          "category",
+          "subcategory_id"
+        ],
+        "rows": []
+      },
+      {
+        "columns": [
+          "product_id",
+          "sku",
+          "subcategory_id",
+          "subcategory_parent"
+        ],
+        "rows": []
+      },
+      {
+        "columns": [
+          "assigned_products"
+        ],
+        "rows": [
+          {
+            "assigned_products": 0
+          }
+        ]
+      },
+      {
+        "columns": [
+          "product_id",
+          "sku",
+          "product_name",
+          "brand",
+          "category",
+          "model"
+        ],
+        "rows": []
+      }
+    ]
+  },
+  "target": "SWGL056\\SQLEXPRESS01/InventoryAI_Test (windows authentication)",
+  "validation_failures": []
+}

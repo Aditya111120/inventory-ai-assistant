@@ -38,6 +38,25 @@ def test_shared_snapshot_date_is_shown_once_and_column_omitted():
     assert display["shared_snapshot_date"] == "2026-09-28"
 
 
+def test_catalog_discovery_table_includes_requested_group_dimension():
+    rows = pd.DataFrame([
+        {"category": "Laptops", "quantity_on_hand": 18},
+        {"category": "Audio", "quantity_on_hand": 12},
+    ])
+    request = Intent(
+        capability="inventory_visibility",
+        question_kind="lookup",
+        metrics=["quantity"],
+        filters=Filters(),
+        group_by="category",
+    )
+
+    table, _ = _presentation(rows, request, "What categories do we carry?")
+
+    assert table.columns.tolist() == ["category", "quantity_on_hand"]
+    assert table["category"].tolist() == ["Laptops", "Audio"]
+
+
 def test_varying_snapshot_dates_keep_date_column():
     rows = pd.concat([base_rows(), base_rows().assign(product_id=2, inventory_snapshot_date="2026-09-29")], ignore_index=True)
     _, display = _presentation(rows, intent(), "Show inventory")
@@ -83,9 +102,11 @@ def test_stockout_top_n_narrative_table_and_counts_share_position_scope():
     assert display["available_result_count"] == 2
     assert display["result_counts"]["matching_result_rows"] == 8
     assert {"product_name", "store_name", "city", "quantity_on_hand", "stockout_risk_v1", "days_of_inventory", "lead_time_days"}.issubset(table.columns)
-    assert "2 highest-risk product-store positions from 8 qualifying positions across 6 distinct products" in narrative
-    for name in table["product_name"]:
-        assert name in narrative
+    assert "highest-risk position is" in narrative
+    assert "8 qualifying positions" in narrative
+    assert "2 results are shown in the table" in narrative
+    assert table["product_name"].iloc[0] in narrative
+    assert table["product_name"].iloc[1] not in narrative
     trust_calculations = _calculation_payload(request, query_result, Rules(), "Actual")
     trust_ranking = next(item for item in trust_calculations if item["metric"] == "stockout_risk_top_n_positions")
     assert trust_ranking["values"]["qualifying_positions"] == 8

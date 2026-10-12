@@ -90,6 +90,41 @@ def test_update_allows_none():
     assert state.last_store_ids is None
 
 
+def test_update_persists_complete_intent_and_basis_without_aliasing():
+    from app.llm.schema import Filters, Intent, Sort, TimeWindow
+
+    intent = Intent(
+        capability="sales_trend",
+        metrics=["sales_revenue", "sales_units"],
+        filters=Filters(brands=["Example"], cities=["Pune"]),
+        group_by="city",
+        time=TimeWindow(kind="month", month=9, year=2026),
+        sort=Sort(by="sales_revenue", direction="desc"),
+        limit=5,
+        question_kind="ranking",
+    )
+    memory = SessionMemory()
+    state = memory.update(
+        "structured",
+        intent=intent,
+        intent_summary="sales",
+        product_ids=[1, 2],
+        store_ids=[10],
+        basis="Actual",
+    )
+
+    intent.filters.brands.append("Mutated after update")
+
+    assert state.last_intent["capability"] == "sales_trend"
+    assert state.last_intent["metrics"] == ["sales_revenue", "sales_units"]
+    assert state.last_intent["filters"]["brands"] == ["Example"]
+    assert state.last_intent["group_by"] == "city"
+    assert state.last_intent["time"]["month"] == 9
+    assert state.last_intent["sort"]["direction"] == "desc"
+    assert state.last_intent["limit"] == 5
+    assert state.last_basis == "Actual"
+
+
 def test_previous_context_contains_summary_but_not_database_ids():
     memory = SessionMemory()
 

@@ -124,6 +124,31 @@ def test_good_intent_validates_and_prompt_is_compact():
     assert len(SYSTEM_PROMPT) < 2200
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Which products are slow-moving?",
+        "Show me the slow moving products.",
+        "Which items are slow movers?",
+        "List the slow sellers.",
+    ],
+)
+def test_slow_moving_phrasings_normalize_to_the_same_store_classification(question):
+    data = {
+        **GOOD,
+        "capability": "inventory_visibility",
+        "metrics": ["quantity"],
+    }
+    client, _ = make([data])
+
+    result = parse_intent(question, client)
+
+    assert result.intent.capability == "excess_slow_moving"
+    assert result.intent.inventory_classification == "slow_moving_candidate"
+    assert result.intent.analysis_scope == "store"
+    assert result.intent.metrics == ["sales_units"]
+
+
 def test_compound_intent_supports_structured_sub_questions():
     intent = Intent.model_validate(
         {
@@ -224,6 +249,173 @@ def test_parse_intent_happy_path():
     c, _ = make([GOOD])
     p = parse_intent("How many SKUs are low, healthy and excess?", c)
     assert p.intent.capability == "inventory_health" and not p.repaired
+
+
+@pytest.mark.parametrize(
+    ("phrases", "capability", "metric", "classification"),
+    [
+        (
+            ["Show slow-moving products", "Which items are slow sellers?"],
+            "excess_slow_moving", "sales_units", "slow_moving_candidate",
+        ),
+        (
+            ["Show products with no recorded sales", "Which products were never sold?"],
+            "excess_slow_moving", "sales_units", "no_recorded_sales",
+        ),
+        (
+            ["Show excess inventory", "List overstocked items"],
+            "excess_slow_moving", "quantity", None,
+        ),
+        (
+            ["Which products have stockout risk?", "Which products may run out of stock?"],
+            "stockout_risk", "stockout_risk", None,
+        ),
+        (
+            ["Show current stock", "How much is on hand?"],
+            "inventory_visibility", "quantity", None,
+        ),
+        (
+            ["Show sales units", "How many units were sold?"],
+            "sales_trend", "sales_units", None,
+        ),
+        (
+            ["Show sales revenue", "What was the sales turnover?"],
+            "sales_trend", "sales_revenue", None,
+        ),
+    ],
+)
+def test_semantic_phrase_variants_map_to_the_same_validated_operation(
+    phrases, capability, metric, classification,
+):
+    actual = []
+    for phrase in phrases:
+        c, _ = make([GOOD])
+        intent = parse_intent(phrase, c).intent
+        actual.append((
+            intent.capability,
+            intent.metrics[0] if intent.metrics else None,
+            intent.inventory_classification,
+        ))
+
+    assert actual == [(capability, metric, classification)] * len(phrases)
+
+
+@pytest.mark.parametrize("question", [
+    "Which store performs best?",
+    "What is the best-performing location?",
+])
+def test_ambiguous_store_performance_preserves_metric_clarification(question):
+    c, _ = make([GOOD])
+    intent = parse_intent(question, c).intent
+
+    assert intent.capability == "sales_trend"
+    assert intent.question_kind == "comparison"
+    assert intent.group_by == "store"
+    assert intent.metrics == []
+    assert intent.sort is None
+
+
+@pytest.mark.parametrize(
+    ("question", "dimension"),
+    [
+        ("What categories do we carry?", "category"),
+        ("List the brands available in our catalog", "brand"),
+        ("Which products do we have?", "product"),
+        ("Show available subcategories", "subcategory"),
+    ],
+)
+def test_catalog_discovery_uses_inventory_backed_grouped_lookup(question, dimension):
+    c, _ = make([GOOD])
+    intent = parse_intent(question, c).intent
+
+    assert intent.capability == "inventory_visibility"
+    assert intent.question_kind == "lookup"
+    assert intent.group_by == dimension
+    assert intent.metrics == ["quantity"]
+
+
+@pytest.mark.parametrize("question", [
+    "Compare sales by category",
+    "Show sales by category",
+])
+def test_sales_grouping_uses_requested_dimension(question):
+    c, _ = make([GOOD])
+    intent = parse_intent(question, c).intent
+
+    assert intent.capability == "sales_trend"
+    assert intent.metrics == ["sales_units"]
+    assert intent.group_by == "category"
+    if question.startswith("Compare"):
+        assert intent.question_kind == "comparison"
+
+
+def test_comparison_wording_variants_share_comparison_operation():
+    for question in (
+        "Compare inventory by category",
+        "Show inventory side by side by category",
+        "What is the difference between Laptops and Smartphones?",
+    ):
+        c, _ = make([GOOD])
+        intent = parse_intent(question, c).intent
+        assert intent.question_kind == "comparison"
+
+
+def test_grouped_inventory_comparison_normalizes_to_inventory_visibility():
+    c, _ = make([GOOD])
+    intent = parse_intent("Compare inventory by category", c).intent
+
+    assert intent.capability == "inventory_visibility"
+    assert intent.question_kind == "comparison"
+    assert intent.group_by == "category"
+    assert intent.metrics == ["quantity"]
+
+
+def test_explicit_filters_and_time_survive_semantic_normalization():
+    from app.llm.schema import Filters, TimeWindow
+
+    response = dict(
+        GOOD,
+        filters={
+            "products": ["Laptop A"],
+            "brands": ["Acme"],
+            "categories": ["Laptops"],
+            "subcategories": ["Ultrabooks"],
+            "stores": ["Central"],
+            "cities": ["Chennai"],
+            "regions": ["South"],
+        },
+        time={"kind": "month", "month": 6, "year": 2026, "compare_to_previous": False},
+    )
+    c, _ = make([response])
+    intent = parse_intent(
+        "Show slow-moving Acme laptops at Central in Chennai for June 2026", c,
+    ).intent
+
+    assert intent.filters == Filters(
+        products=["Laptop A"], brands=["Acme"], categories=["Laptops"],
+        subcategories=["Ultrabooks"], stores=["Central"], cities=["Chennai"],
+        regions=["South"],
+    )
+    assert intent.time == TimeWindow(kind="month", month=6, year=2026)
+    assert intent.inventory_classification == "slow_moving_candidate"
+
+
+def test_followup_and_legacy_intent_contracts_remain_compatible():
+    c, _ = make([dict(
+        GOOD,
+        capability="inventory_visibility",
+        filters={**GOOD["filters"], "products": ["Laptop A"], "stores": ["Central"]},
+        uses_previous_result=True,
+    )])
+    intent = parse_intent(
+        "Show it at Central", c, context="inventory_visibility for Laptop A",
+    ).intent
+
+    assert intent.uses_previous_result is True
+    assert intent.filters.products == ["Laptop A"]
+    assert intent.filters.stores == ["Central"]
+    assert intent.analysis_scope == "unspecified"
+    assert intent.inventory_classification is None
 
 
 def test_attention_request_is_normalized_to_health_not_lowest_inventory():

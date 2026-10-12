@@ -3,6 +3,7 @@ from datetime import date
 import pandas as pd
 
 from app.calc.metrics import Rules
+from app.context import UserContext
 from app.llm.schema import Filters, Intent, TimeWindow
 from app.llm.client import Usage
 from app.orchestrator import Orchestrator, _merge_scenario_clarification_reply, _usage_or_zero, parse_clarification_period
@@ -42,6 +43,217 @@ def test_city_options_are_limited_to_authorized_stores():
     resolver = _resolver()
     options = resolver.city_store_options("Chennai", authorized_store_ids=(11,))
     assert [item["store_name"] for item in options] == ["Velachery"]
+
+
+def test_store_level_capability_offers_only_authorized_city_options():
+    orchestrator = _orchestrator()
+    intent = _intent().model_copy(update={
+        "filters": Filters(categories=["Laptops"]),
+        "capability": "excess_slow_moving",
+        "analysis_scope": "store",
+    })
+    response = orchestrator._location_clarification(
+        intent=intent,
+        resolution=_resolver().resolve(Filters(categories=["Laptops"])),
+        session_id="city-choice",
+        previous_state=orchestrator.sessions.get("city-choice"),
+        user_context=UserContext(
+            persona="Leadership", authorized_store_ids=(11, 20),
+        ),
+        usage=Usage(calls=0),
+    )
+
+    assert response.status == "clarification"
+    assert response.clarification_kind == "location"
+    assert {option["label"] for option in response.clarification_options} == {"Chennai", "Delhi"}
+
+
+def test_city_selection_prompts_for_authorized_store_and_preserves_scope():
+    orchestrator = _orchestrator()
+    intent = _intent().model_copy(update={
+        "capability": "excess_slow_moving",
+        "analysis_scope": "store",
+    })
+    city_prompt = orchestrator._clarification_response(
+        session_id="store-choice",
+        intent=intent,
+        kind="location",
+        prompt="Which city?",
+        options=[{"label": "Chennai", "value": "Chennai"}],
+        field="cities",
+    )
+    selected, matched, error = orchestrator._resume_pending(
+        city_prompt.clarification_options[0]["token"],
+        orchestrator.sessions.pending("store-choice"),
+    )
+    assert matched and error is None
+    assert selected.filters.categories == ["Laptops"]
+    assert selected.filters.cities == ["Chennai"]
+
+    resolver = _resolver()
+    response = orchestrator._location_clarification(
+        intent=selected,
+        resolution=resolver.resolve(selected.filters),
+        session_id="store-choice",
+        previous_state=orchestrator.sessions.get("store-choice"),
+        user_context=UserContext(
+            persona="Leadership", authorized_store_ids=(11,),
+        ),
+        usage=Usage(calls=0),
+    )
+
+    assert response.status == "clarification"
+    assert response.clarification_kind == "location_store"
+    assert [option["label"] for option in response.clarification_options] == ["Velachery"]
+    assert response.intent.filters.categories == ["Laptops"]
+    assert response.intent.filters.cities == ["Chennai"]
+
+
+def test_city_store_clarification_preserves_original_analytical_request():
+    orchestrator = _orchestrator()
+    resolver = _resolver()
+    original_question = "Which slow-moving laptop products should I review?"
+    intent = Intent(
+        capability="excess_slow_moving",
+        inventory_classification="slow_moving_candidate",
+        analysis_scope="store",
+        metrics=["sales_units"],
+        filters=Filters(categories=["Laptops"]),
+        time=TimeWindow(kind="last_n_days", n=30),
+        question_kind="ranking",
+    )
+    city_response = orchestrator._clarification_response(
+        session_id="full-city-store",
+        intent=intent,
+        kind="location",
+        prompt="Which city?",
+        options=[{"label": "Chennai", "value": "Chennai"}],
+        field="cities",
+        original_question=original_question,
+    )
+    pending_city = orchestrator.sessions.pending("full-city-store")
+    selected_city, matched, error = orchestrator._resume_pending(
+        city_response.clarification_options[0]["token"],
+        pending_city,
+    )
+    assert matched and error is None
+
+    store_response = orchestrator._location_clarification(
+        intent=selected_city,
+        resolution=resolver.resolve(selected_city.filters),
+        session_id="full-city-store",
+        previous_state=orchestrator.sessions.get("full-city-store"),
+        user_context=UserContext(
+            persona="Leadership", authorized_store_ids=(11,),
+        ),
+        usage=Usage(calls=0),
+        original_question=pending_city["original_question"],
+    )
+    pending_store = orchestrator.sessions.pending("full-city-store")
+    selected_store, matched, error = orchestrator._resume_pending(
+        store_response.clarification_options[0]["token"],
+        pending_store,
+    )
+
+    assert store_response.status == "clarification"
+    assert [option["label"] for option in store_response.clarification_options] == ["Velachery"]
+    assert pending_store["original_question"] == original_question
+    assert matched and error is None
+    assert selected_store.capability == "excess_slow_moving"
+    assert selected_store.inventory_classification == "slow_moving_candidate"
+    assert selected_store.metrics == ["sales_units"]
+    assert selected_store.filters.categories == ["Laptops"]
+    assert selected_store.filters.cities == ["Chennai"]
+    assert selected_store.filters.stores == ["Velachery"]
+    assert selected_store.time.n == 30
+
+
+def test_city_and_region_filters_still_prompt_for_store_within_resolved_scope():
+    orchestrator = _orchestrator()
+    resolver = _resolver()
+    filters = Filters(categories=["Laptops"], cities=["Chennai"], regions=["South"])
+    intent = Intent(
+        capability="excess_slow_moving",
+        inventory_classification="slow_moving_candidate",
+        analysis_scope="store",
+        metrics=["sales_units"],
+        filters=filters,
+    )
+    response = orchestrator._location_clarification(
+        intent=intent,
+        resolution=resolver.resolve(filters),
+        session_id="city-region-choice",
+        previous_state=orchestrator.sessions.get("city-region-choice"),
+        user_context=UserContext(
+            persona="Leadership", authorized_store_ids=(10, 11),
+        ),
+        usage=Usage(calls=0),
+    )
+
+    assert response.status == "clarification"
+    assert response.clarification_kind == "location_store"
+    assert {option["label"] for option in response.clarification_options} == {
+        "Central", "Velachery",
+    }
+
+
+def test_uniquely_resolved_explicit_store_executes_without_clarification():
+    orchestrator = _orchestrator()
+    resolver = _resolver()
+    filters = Filters(categories=["Laptops"], stores=["Central"])
+    intent = Intent(
+        capability="excess_slow_moving",
+        inventory_classification="slow_moving_candidate",
+        analysis_scope="store",
+        metrics=["sales_units"],
+        filters=filters,
+    )
+
+    assert orchestrator._location_clarification(
+        intent=intent,
+        resolution=resolver.resolve(filters),
+        session_id="explicit-store",
+        previous_state=orchestrator.sessions.get("explicit-store"),
+        user_context=UserContext(
+            persona="Leadership", authorized_store_ids=(10,),
+        ),
+        usage=Usage(calls=0),
+    ) is None
+
+
+def test_organization_scope_and_grouped_rankings_do_not_prompt_for_store():
+    orchestrator = _orchestrator()
+    resolution = _resolver().resolve(Filters())
+    previous = orchestrator.sessions.get("organization")
+    user_context = UserContext(
+        persona="Leadership", authorized_store_ids=(10, 11, 20),
+    )
+    org_intent = _intent().model_copy(update={
+        "capability": "excess_slow_moving",
+        "analysis_scope": "organization",
+    })
+    assert orchestrator._location_clarification(
+        intent=org_intent,
+        resolution=resolution,
+        session_id="organization",
+        previous_state=previous,
+        user_context=user_context,
+        usage=Usage(calls=0),
+    ) is None
+
+    category_ranking = org_intent.model_copy(update={
+        "analysis_scope": "store",
+        "group_by": "category",
+        "question_kind": "ranking",
+    })
+    assert orchestrator._location_clarification(
+        intent=category_ranking,
+        resolution=resolution,
+        session_id="organization",
+        previous_state=previous,
+        user_context=user_context,
+        usage=Usage(calls=0),
+    ) is None
 
 
 def test_pending_store_choice_merges_only_the_selected_scope():

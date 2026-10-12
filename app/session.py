@@ -27,6 +27,8 @@ class SessionState:
     last_comparison_mode: str = ""
     last_scope: str = ""
     last_time: Optional[dict] = None
+    last_intent: Optional[dict] = None
+    last_basis: str = ""
     # Structured, server-owned clarification state.  Option IDs in this
     # object are opaque tokens; database IDs are never sent to the LLM/UI.
     pending_clarification: Optional[dict] = None
@@ -57,6 +59,7 @@ class SessionMemory:
         intent_summary: str,
         product_ids: Optional[list[int]],
         store_ids: Optional[list[int]],
+        basis: str = "",
     ) -> SessionState:
         """Store the latest deterministic context for a session."""
 
@@ -71,6 +74,11 @@ class SessionMemory:
         )
 
         if intent is not None:
+            state.last_intent = (
+                intent.model_dump()
+                if hasattr(intent, "model_dump")
+                else dict(intent)
+            )
             state.last_capability = getattr(intent, "capability", "")
             state.last_question_kind = getattr(intent, "question_kind", "")
             metrics = getattr(intent, "metrics", None) or []
@@ -98,6 +106,7 @@ class SessionMemory:
             state.last_time = (
                 time.model_dump() if hasattr(time, "model_dump") else None
             )
+            state.last_basis = basis
 
         return state
 
@@ -154,6 +163,21 @@ class SessionMemory:
 
         if state.last_scope:
             parts.append(f"scope={state.last_scope}")
+
+        if state.last_intent:
+            parts.append(
+                f"classification={state.last_intent.get('inventory_classification') or 'none'}"
+            )
+            filters = state.last_intent.get("filters") or {}
+            for field in (
+                "products", "brands", "categories", "subcategories",
+                "stores", "cities", "regions",
+            ):
+                values = filters.get(field) or []
+                if values:
+                    parts.append(f"{field}={','.join(map(str, values))}")
+            if state.last_basis:
+                parts.append(f"basis={state.last_basis}")
 
         if state.last_time and state.last_time.get("kind", "none") != "none":
             parts.append("time=" + ";".join(

@@ -10,6 +10,7 @@ be added in the next phase without changing the orchestration contract.
 from __future__ import annotations
 
 import calendar
+import logging
 import re
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -20,12 +21,15 @@ import pandas as pd
 from app.answer_builder import (
     build_answer,
     build_subject_comparison_answer,
+    concise_leadership_answer,
+    complete_narrative_context,
+    validate_narrative_evidence,
 )
 from app.context import UserContext, build_followups, effective_ids
 from app.dispatch import DispatchResult, dispatch
 from app.llm.client import LLMUnavailable, Usage
 from app.llm.intent import IntentError, ParsedIntent, parse_intent
-from app.llm.schema import Intent, Sort
+from app.llm.schema import Intent, Sort, TimeWindow
 from app.narration import Narrator
 from app.response_composer import (
     build_answer_facts,
@@ -35,6 +39,8 @@ from app.response_composer import (
 from app.response_router import plan_response
 from app.session import SessionMemory
 
+
+logger = logging.getLogger(__name__)
 
 
 def parse_clarification_period(text: str):
@@ -278,54 +284,283 @@ def _has_unsupported_inventory_sales_tradeoff(question: str) -> bool:
     return has_inventory_value and has_sales and has_opposed_extremes
 
 
-def _apply_followup_context(question: str, intent, previous_state):
-    """Inherit only relevant prior context for explicit entity-replacement turns."""
-    text = question.casefold()
-    entity_fields = ("products", "brands", "categories", "subcategories")
-    has_new_entity = any(getattr(intent.filters, field, []) for field in entity_fields)
-    replacement = has_new_entity and bool(
-        re.search(r"\b(?:instead|rather than|replace|switch to|change to)\b", text)
+def _context_continuation(question: str) -> bool:
+    """Recognize follow-up modifiers without making a bare new query dependent."""
+    text = question.casefold().strip()
+    return bool(
+        _explicitly_references_previous_result(text)
+        or _has_scope_clear_request(text)
+        or re.match(
+            r"^(?:now\s+(?:for|show|use|sort|group|change)|"
+            r"(?:and|instead|rather than|same|switch to|change to|"
+            r"sort(?: it)?|group(?: it)?))\b",
+            text,
+        )
+        or re.match(
+            r"^(?:(?:now\s+)?(?:ascending|descending|asc(?:ending)?|desc(?:ending)?))\b",
+            text,
+        )
     )
-    explicit_time = _has_explicit_time(question)
-    explicit_followup = _explicitly_references_previous_result(question)
 
-    if not explicit_time and not explicit_followup:
-        # The LLM may echo a previous period from prompt context. An independent
-        # request must not accidentally turn current operational metrics into a
-        # historical query.
-        if getattr(getattr(intent, "time", None), "kind", "none") != "none":
-            intent = intent.model_copy(update={
-                "time": intent.time.model_copy(update={
-                    "kind": "none", "month": None, "year": None,
-                    "date": None, "start_date": None, "end_date": None,
-                    "comparison_month": None, "comparison_year": None,
-                    "comparison_start_date": None, "comparison_end_date": None,
-                    "n": None, "compare_to_previous": False,
-                })
-            })
 
-    if not replacement:
+def _question_has_capability(question: str) -> bool:
+    """Whether the turn states an analytical operation rather than only a modifier."""
+    return bool(re.search(
+        r"\b(?:inventory|stock|sales|revenue|turnover|sold|stockout|"
+        r"slow[- ]moving|slow sellers?|no sales|excess|overstock|"
+        r"what if|scenario|historical|snapshot|executive summary|"
+        r"attention|reorder)\b",
+        question.casefold(),
+    ))
+
+
+def _question_has_metric(question: str) -> bool:
+    return bool(re.search(
+        r"\b(?:revenue|turnover|sales value|sales units|units sold|"
+        r"sold units|growth|inventory value|stock value|quantity|"
+        r"days of inventory|coverage|risk|stock status)\b",
+        question.casefold(),
+    ))
+
+
+def _has_scope_clear_request(question: str) -> bool:
+    return bool(re.search(
+        r"\b(?:overall|company[- ]wide|organization[- ]wide|"
+        r"across all (?:authorized )?(?:stores|cities|regions|products|brands|categories)|"
+        r"all (?:authorized )?(?:stores|cities|regions)|"
+        r"entire organization)\b",
+        question.casefold(),
+    ))
+
+
+def _contains_filter_value(question: str, value: str) -> bool:
+    """Match a parsed entity label against the user turn, not prior context."""
+    normalize = lambda value: re.sub(r"[^a-z0-9]+", " ", str(value).casefold()).strip()
+    candidate = normalize(value)
+    text = f" {normalize(question)} "
+    return bool(candidate and f" {candidate} " in text)
+
+
+def _stored_intent(previous_state) -> Optional[Intent]:
+    payload = getattr(previous_state, "last_intent", None)
+    if isinstance(payload, dict):
+        try:
+            return Intent.model_validate(payload)
+        except Exception:
+            pass
+    capability = getattr(previous_state, "last_capability", "")
+    if not capability:
+        return None
+    try:
+        time = TimeWindow.model_validate(
+            getattr(previous_state, "last_time", None) or {}
+        )
+        sort = None
+        if getattr(previous_state, "last_sort_metric", ""):
+            sort = Sort(
+                by=previous_state.last_sort_metric,
+                direction=previous_state.last_sort_direction or "desc",
+            )
+        return Intent(
+            capability=capability,
+            question_kind=getattr(previous_state, "last_question_kind", "") or "lookup",
+            metrics=[previous_state.last_metric] if getattr(previous_state, "last_metric", "") else [],
+            group_by=getattr(previous_state, "last_group_by", "") or None,
+            time=time,
+            sort=sort,
+            comparison_mode=getattr(previous_state, "last_comparison_mode", "") or "none",
+            comparison_subject=getattr(previous_state, "last_subject", "") or None,
+        )
+    except Exception:
+        return None
+
+
+def _ground_explicit_filters(question: str, intent, resolver):
+    """Restore exact catalog filters mentioned in text but omitted by parsing."""
+    period = parse_clarification_period(question)
+    if period and getattr(intent.time, "kind", "none") == "none":
+        intent = intent.model_copy(
+            update={"time": TimeWindow.model_validate(period)}
+        )
+
+    extract = getattr(resolver, "explicit_filter_mentions", None)
+    if not callable(extract):
         return intent
 
-    updates = {"uses_previous_result": True}
-    if previous_state.last_capability:
-        updates["capability"] = previous_state.last_capability
-    metric_was_replaced = bool(re.search(
-        r"\b(?:sales revenue|revenue|turnover|sales units|units sold|sold units)\b",
+    mentions = extract(question)
+    filters = intent.filters
+    updates = {}
+    for field in (
+        "products", "brands", "categories", "subcategories",
+        "stores", "cities", "regions",
+    ):
+        values = list(getattr(mentions, field, []) or [])
+        if values:
+            updates[field] = values
+    if not updates:
+        return intent
+
+    return intent.model_copy(
+        update={
+            "filters": type(filters).model_validate({
+                **filters.model_dump(),
+                **updates,
+            })
+        }
+    )
+
+
+def _apply_followup_context(question: str, intent, previous_state):
+    """Reconcile follow-up dimensions with KEEP, REPLACE, CLEAR, or no inheritance."""
+    text = question.casefold()
+    prior = _stored_intent(previous_state)
+    continuation = _context_continuation(question) or (
+        getattr(intent, "capability", "") == "what_if"
+        and bool(getattr(previous_state, "last_product_ids", None))
+    )
+    if prior is None and continuation and getattr(intent, "uses_previous_result", False):
+        return intent
+    if prior is None or not continuation:
+        # A complete new request is independent even when the parser echoes
+        # previous-result metadata or a prior period from prompt context.
+        if not _has_explicit_time(question) and getattr(intent.time, "kind", "none") != "none":
+            intent = intent.model_copy(update={"time": TimeWindow()})
+        return intent.model_copy(update={"uses_previous_result": False})
+
+    filters = intent.filters
+    previous_filters = prior.filters
+    fields = ("products", "brands", "categories", "subcategories", "stores", "cities", "regions")
+    explicit_values = {
+        field: [
+            str(value) for value in getattr(filters, field, []) or []
+            if _contains_filter_value(question, str(value))
+        ]
+        for field in fields
+    }
+    clear_all = _has_scope_clear_request(question) or intent.analysis_scope == "organization"
+
+    merged = {
+        field: (
+            []
+            if clear_all
+            else explicit_values[field]
+            if explicit_values[field]
+            else list(getattr(previous_filters, field, []) or [])
+        )
+        for field in fields
+    }
+    changed_product_field = any(
+        explicit_values[field]
+        and explicit_values[field] != list(getattr(previous_filters, field, []) or [])
+        for field in ("products", "brands", "categories", "subcategories")
+    )
+    if changed_product_field and not explicit_values["products"]:
+        merged["products"] = []
+    if explicit_values["products"]:
+        for field in ("brands", "categories", "subcategories"):
+            if not explicit_values[field]:
+                merged[field] = []
+
+    has_explicit_city = bool(explicit_values["cities"])
+    has_explicit_store = bool(explicit_values["stores"])
+    has_explicit_region = bool(explicit_values["regions"])
+    if has_explicit_city:
+        merged["stores"] = explicit_values["stores"]
+        merged["regions"] = explicit_values["regions"]
+    elif has_explicit_store:
+        merged["cities"] = explicit_values["cities"]
+        merged["regions"] = explicit_values["regions"]
+    elif has_explicit_region:
+        merged["cities"] = explicit_values["cities"]
+        merged["stores"] = explicit_values["stores"]
+
+    explicit_clear_fields = set()
+    if re.search(r"\b(?:all|any)\s+(?:authorized\s+)?stores\b|\bany location\b", text):
+        explicit_clear_fields.update(("stores", "cities", "regions"))
+    if re.search(r"\b(?:all|any)\s+brands\b", text):
+        explicit_clear_fields.add("brands")
+    if re.search(r"\b(?:all|any)\s+products\b|\bwhole catalog\b|\bentire catalog\b", text):
+        explicit_clear_fields.update(("products", "brands", "categories", "subcategories"))
+    for field in explicit_clear_fields:
+        merged[field] = []
+
+    updates: dict[str, Any] = {
+        "filters": type(filters).model_validate(merged),
+        "uses_previous_result": True,
+    }
+    capability_changed = (
+        _question_has_capability(question)
+        and intent.capability not in {"clarification", "out_of_scope"}
+        and intent.capability != prior.capability
+    )
+    if not _question_has_capability(question) or intent.capability in {"clarification", "out_of_scope"}:
+        updates["capability"] = prior.capability
+        updates["inventory_classification"] = prior.inventory_classification
+    elif intent.capability == prior.capability and prior.inventory_classification and not re.search(
+        r"\b(?:slow[- ]moving|slow sellers?|no sales|no recorded sales|excess|overstock)\b",
+        text,
+    ):
+        updates["inventory_classification"] = prior.inventory_classification
+    if not capability_changed and not _question_has_metric(question) and prior.metrics:
+        updates["metrics"] = list(prior.metrics)
+    explicit_question_kind = bool(re.search(
+        r"\b(?:top|bottom|highest|lowest|rank(?:ing)?|compare|comparison|"
+        r"versus|vs\.?|explain|why|trend)\b",
         text,
     ))
-    if previous_state.last_metric and not metric_was_replaced:
-        updates["metrics"] = [previous_state.last_metric]
-    if previous_state.last_group_by and getattr(intent, "group_by", None) is None:
-        updates["group_by"] = previous_state.last_group_by
-    if previous_state.last_sort_metric and getattr(intent, "sort", None) is None:
-        updates["sort"] = Sort(
-            by=previous_state.last_sort_metric,
-            direction=previous_state.last_sort_direction or "desc",
+    if not explicit_question_kind and not capability_changed:
+        updates["question_kind"] = prior.question_kind
+    if (intent.group_by is None or not re.search(
+        r"\b(?:by|group(?:ed)? by|per|for each|compare|versus|vs\.?)\s+"
+        r"(?:products?|items?|brands?|categor(?:y|ies)|subcategor(?:y|ies)|stores?|cit(?:y|ies)|regions?)\b",
+        text,
+    )) and not capability_changed:
+        updates["group_by"] = prior.group_by
+
+    if not _has_explicit_time(question):
+        updates["time"] = prior.time
+    direction = (
+        "asc" if re.search(r"\b(?:ascending|asc)\b", text)
+        else "desc" if re.search(r"\b(?:descending|desc)\b", text)
+        else None
+    )
+    if direction and (
+        intent.sort is not None or (prior.sort is not None and not capability_changed)
+    ):
+        sort = intent.sort or prior.sort
+        updates["sort"] = sort.model_copy(update={"direction": direction})
+    elif intent.sort is None and prior.sort is not None and not capability_changed:
+        updates["sort"] = prior.sort
+    if intent.limit is None and prior.limit is not None and not clear_all and not capability_changed:
+        updates["limit"] = prior.limit
+    if intent.threshold is None and prior.threshold is not None and not capability_changed:
+        updates["threshold"] = prior.threshold
+    if intent.scenario is None and prior.scenario is not None and not capability_changed:
+        updates["scenario"] = prior.scenario
+    if intent.comparison_mode == "none" and prior.comparison_mode != "none" and not capability_changed:
+        updates["comparison_mode"] = prior.comparison_mode
+        updates["comparison_subject"] = prior.comparison_subject
+
+    if clear_all:
+        updates.update(
+            analysis_scope="organization",
+            uses_previous_result=False,
+            filters=type(filters).model_validate({
+                **merged,
+                "stores": [], "cities": [], "regions": [],
+            }),
         )
-    if not explicit_time and previous_state.last_time:
-        updates["time"] = intent.time.model_copy(update=previous_state.last_time)
+    elif getattr(intent, "analysis_scope", "unspecified") == "unspecified":
+        updates["analysis_scope"] = prior.analysis_scope
     return intent.model_copy(update=updates)
+
+
+def _same_filter_scope(left, right, fields: tuple[str, ...]) -> bool:
+    return all(
+        list(getattr(left, field, []) or [])
+        == list(getattr(right, field, []) or [])
+        for field in fields
+    )
 
 
 def _leadership_defaults(question: str, intent, user_context: UserContext):
@@ -474,19 +709,15 @@ def _catalog_brand_comparison(question: str, intent, resolver):
     })
 
 
-_OPERATIONAL_CAPABILITIES = {
-    "inventory_visibility", "inventory_health", "stockout_risk",
-    "excess_slow_moving", "what_if",
+_LOCATION_POLICIES = {
+    # This capability evaluates slow/excess inventory at operational
+    # product-store grain. Other capabilities use their requested grouping or
+    # the authorized organization scope unless the intent explicitly asks for
+    # a store-level analysis.
+    "excess_slow_moving": ("city", "store"),
 }
 
-
-def _explicitly_requests_global_scope(question: str) -> bool:
-    text = re.sub(r"[^a-z0-9]+", " ", question.casefold()).strip()
-    return bool(re.search(
-        r"\b(?:company wide|companywide|company level|overall|whole catalog|"
-        r"entire catalog|across all stores|all stores|every store|city wide|"
-        r"citywide|by city|across [a-z0-9 ]+ stores|compare [a-z0-9 ]*stores)\b", text,
-    ))
+_ORGANIZATION_GROUPS = {"brand", "category", "city", "region", "store"}
 
 
 def _clarification_id() -> str:
@@ -606,6 +837,11 @@ def _dispatch_result_contract_issue(intent, frame: pd.DataFrame) -> str | None:
     elif capability == "historical_analysis":
         required.extend(["qty_now", "qty_before", "snapshot_date", "snapshot_date_before"])
     else:
+        classification = getattr(intent, "inventory_classification", None)
+        slow_moving_result = (
+            capability == "excess_slow_moving"
+            and classification in {"slow_moving_candidate", "no_recorded_sales"}
+        )
         metric_columns = {
             "quantity": "quantity_on_hand", "inventory_value": "inventory_value",
             "sales_units": "units", "sales_revenue": "revenue",
@@ -613,11 +849,20 @@ def _dispatch_result_contract_issue(intent, frame: pd.DataFrame) -> str | None:
         }
         for metric in getattr(intent, "metrics", []) or []:
             column = metric_columns.get(metric)
+            if slow_moving_result and metric == "sales_units":
+                column = "units_sold_window"
             if column:
                 required.append(column)
+        if slow_moving_result:
+            required.extend([
+                "product_id", "store_id", "product_name",
+                "units_sold_window", "demand_status",
+            ])
         sort = getattr(intent, "sort", None)
         if sort is not None:
             sort_column = metric_columns.get(getattr(sort, "by", None))
+            if slow_moving_result and getattr(sort, "by", None) == "sales_units":
+                sort_column = "units_sold_window"
             if sort_column:
                 required.append(sort_column)
     group = getattr(intent, "group_by", None)
@@ -673,9 +918,38 @@ def _presentation(result: pd.DataFrame, intent, question: str = "") -> tuple[pd.
         if capability == "historical_analysis":
             metric_column = "qty_now"
         wanted = [dimension_column, metric_column, "qty_before", "qty_change", "snapshot_date_before", "snapshot_date", "units_prev", "revenue_prev", "units_change", "growth_pct", "revenue_change", "revenue_growth_pct"]
-    elif kind == "ranking":
-        response_type = "ranking"
-        if capability == "stockout_risk":
+    elif (
+        kind == "ranking"
+        or (
+            capability == "excess_slow_moving"
+            and getattr(intent, "inventory_classification", None)
+            in {"slow_moving_candidate", "no_recorded_sales"}
+        )
+    ):
+        response_type = "ranking" if kind == "ranking" else kind
+        classification = getattr(intent, "inventory_classification", None)
+        if capability == "excess_slow_moving" and classification in {
+            "slow_moving_candidate",
+            "no_recorded_sales",
+        }:
+            wanted = [
+                "product_name", "brand", "category", "subcategory",
+                "store_name", "city", "region", "quantity_on_hand",
+                "units_sold_window", "demand_status", "days_of_inventory",
+                "inventory_snapshot_date",
+            ]
+        elif capability == "excess_slow_moving" and classification in {
+            "excess_by_max_level",
+            "excess_coverage_candidate",
+        }:
+            wanted = [
+                "product_name", "brand", "category", "subcategory",
+                "store_name", "city", "region", "quantity_on_hand",
+                "max_level", "days_of_inventory", "units_sold_window",
+                "excess_by_max_level", "excess_coverage_candidate",
+                "inventory_snapshot_date",
+            ]
+        elif capability == "stockout_risk":
             wanted = [
                 "product_name", "brand", "category", "subcategory",
                 "store_name", "city", "quantity_on_hand", "avg_daily_sales",
@@ -716,6 +990,18 @@ def _presentation(result: pd.DataFrame, intent, question: str = "") -> tuple[pd.
     else:
         response_type = kind
         wanted = ["product_id", "sku", "product_name", "subcategory", "store_id", "store_name", "city", "region", "quantity_on_hand", "inventory_value", "inventory_snapshot_date"]
+    if capability == "inventory_visibility" and kind == "lookup":
+        group_column = {
+            "product": "product_name",
+            "brand": "brand",
+            "category": "category",
+            "subcategory": "subcategory",
+            "store": "store_name",
+            "city": "city",
+            "region": "region",
+        }.get(getattr(intent, "group_by", None))
+        if group_column and group_column in result.columns and group_column not in wanted:
+            wanted.insert(0, group_column)
     text = question.casefold()
     columns = [column for column in wanted if column in result.columns]
     include_identifiers = (
@@ -1343,6 +1629,7 @@ class Orchestrator:
         field: Optional[str] = None,
         usage=None,
         interpretation=None,
+        original_question: str = "",
     ) -> OrchestratorResponse:
         clarification_id = _clarification_id()
         safe_options = []
@@ -1364,6 +1651,7 @@ class Orchestrator:
             "intent": intent.model_dump() if hasattr(intent, "model_dump") else intent,
             "options": stored_options,
             "field": field or ("stores" if kind == "location_store" else "cities" if kind == "location" else "time"),
+            "original_question": original_question,
         })
         return OrchestratorResponse(
             session_id=session_id,
@@ -1379,66 +1667,69 @@ class Orchestrator:
         )
 
     def _location_clarification(
-        self, *, question: str, intent, resolution, session_id: str,
+        self, *, intent, resolution, session_id: str,
         previous_state, user_context: UserContext, usage,
+        original_question: str = "",
     ) -> Optional[OrchestratorResponse]:
-        """Apply deterministic location policy for operational capabilities."""
-        if getattr(intent, "capability", "") not in _OPERATIONAL_CAPABILITIES:
+        """Apply capability and intent-scope location policies."""
+        capability = getattr(intent, "capability", "")
+        required_dimensions = _LOCATION_POLICIES.get(capability, ())
+        if (
+            capability == "excess_slow_moving"
+            and getattr(intent, "inventory_classification", None)
+            != "slow_moving_candidate"
+        ):
+            required_dimensions = ()
+        analysis_scope = getattr(intent, "analysis_scope", "unspecified")
+        if analysis_scope == "organization":
             return None
-        if getattr(intent, "question_kind", "lookup") == "comparison":
+        grouped_across_organization = (
+            getattr(intent, "question_kind", "lookup") in {"ranking", "comparison"}
+            and getattr(intent, "group_by", None) in _ORGANIZATION_GROUPS
+        )
+        if grouped_across_organization:
             return None
         filters = intent.filters
-        requests_particular_store = bool(re.search(
-            r"\b(?:at|in)\s+(?:(?:a|the|one|some)\s+)?(?:(?:particular|specific)\s+)?(?:individual\s+)?store\b",
-            question.casefold(),
-        ))
-        if (
-            getattr(user_context, "persona", "") == "Leadership"
-            and requests_particular_store
-            and not (getattr(filters, "stores", []) or getattr(filters, "cities", []) or getattr(filters, "regions", []))
-            and hasattr(self.resolver, "store_options")
-        ):
-            stores = self.resolver.store_options(user_context.authorized_store_ids)
-            options = [
-                {"label": item["store_name"], "value": item["store_name"], "description": item["city"]}
-                for item in stores
-            ]
-            return self._clarification_response(
-                session_id=session_id,
-                intent=intent,
-                kind="location_store",
-                field="stores",
-                prompt="Which store would you like to check?",
-                options=options,
-                usage=usage,
-            )
-        # Leadership's default operational scope is the full server-authorized
-        # organization. A city request is therefore city-wide unless a store
-        # is explicitly named; do not ask for an unnecessary store choice.
-        if getattr(user_context, "persona", "") == "Leadership":
-            return None
-        if _explicitly_requests_global_scope(question):
-            return None
-        # An explicit request for the user's stores means their entire
-        # server-authorized scope, not a request for a single city.
-        if re.search(r"\b(?:my|our)\s+(?:authorized\s+)?stores\b", question.casefold()):
-            return None
-        has_location = bool(
-            getattr(filters, "stores", [])
-            or getattr(filters, "cities", [])
-            or getattr(filters, "regions", [])
+        explicit_stores = list(getattr(filters, "stores", []) or [])
+        explicit_cities = list(getattr(filters, "cities", []) or [])
+        explicit_regions = list(getattr(filters, "regions", []) or [])
+        city_inventory_needs_position = (
+            capability == "inventory_visibility"
+            and len(explicit_cities) == 1
+            and not explicit_stores
         )
+        if (
+            analysis_scope != "store"
+            and not required_dimensions
+            and not city_inventory_needs_position
+        ):
+            return None
+
         prior_scope = bool(
             getattr(intent, "uses_previous_result", False)
             and previous_state.last_store_ids
+            and not (explicit_stores or explicit_cities or explicit_regions)
         )
-        resolver = self.resolver
-        if not hasattr(resolver, "city_store_options"):
-            # Test doubles and legacy resolver adapters may not expose the
-            # catalog option API; retain their existing behavior.
+        resolved_store_ids = getattr(resolution, "store_ids", None)
+        if explicit_stores and resolved_store_ids and len(resolved_store_ids) == 1:
             return None
-        if not has_location and not prior_scope:
-            locations = resolver.location_options(user_context.authorized_store_ids)
+
+        if prior_scope:
+            return None
+
+        authorized_store_ids = getattr(user_context, "authorized_store_ids", None)
+        if resolved_store_ids is not None:
+            allowed = set(map(int, resolved_store_ids))
+            if authorized_store_ids is not None:
+                allowed &= set(map(int, authorized_store_ids))
+            location_store_ids = sorted(allowed)
+        else:
+            location_store_ids = authorized_store_ids
+
+        if not (explicit_cities or explicit_stores):
+            if not hasattr(self.resolver, "location_options"):
+                return None
+            locations = self.resolver.location_options(location_store_ids)
             options = [
                 {
                     "label": item["city"],
@@ -1447,19 +1738,55 @@ class Orchestrator:
                 }
                 for item in locations
             ]
+            if not options:
+                return OrchestratorResponse(
+                    session_id=session_id,
+                    status="out_of_scope",
+                    intent=intent,
+                    usage=usage,
+                    error="No authorized locations are available for this store-level analysis.",
+                )
+            return self._clarification_response(
+                session_id=session_id, intent=intent, kind="location",
+                prompt="Which city would you like to check?",
+                options=options, usage=usage,
+                original_question=original_question,
+            )
+
+        if explicit_stores and resolved_store_ids and len(resolved_store_ids) > 1:
+            if not hasattr(self.resolver, "store_options"):
+                return None
+            stores = self.resolver.store_options(sorted(set(map(int, resolved_store_ids))))
+            options = [
+                {
+                    "label": str(store["store_name"]),
+                    "value": str(store["store_name"]),
+                    "values": [str(store["store_name"])],
+                    "description": str(store["city"]),
+                }
+                for store in stores
+            ]
             if options:
                 return self._clarification_response(
-                    session_id=session_id, intent=intent, kind="location",
-                    prompt="Which city would you like to check? I can show the available stores there.",
+                    session_id=session_id, intent=intent, kind="location_store",
+                    prompt="Which matching store would you like to check?",
                     options=options, usage=usage,
+                    original_question=original_question,
                 )
+
+        if len(explicit_cities) != 1 or explicit_stores:
             return None
-        cities = list(getattr(filters, "cities", []) or [])
-        if len(cities) != 1 or getattr(filters, "stores", []) or getattr(filters, "regions", []):
+        if not hasattr(self.resolver, "city_store_options"):
             return None
-        stores = resolver.city_store_options(cities[0], user_context.authorized_store_ids)
-        if len(stores) <= 1:
-            return None
+        stores = self.resolver.city_store_options(explicit_cities[0], location_store_ids)
+        if not stores:
+            return OrchestratorResponse(
+                session_id=session_id,
+                status="out_of_scope",
+                intent=intent,
+                usage=usage,
+                error="No authorized stores are available in the selected city.",
+            )
         options = [
             {
                 "label": str(store["store_name"]),
@@ -1469,16 +1796,11 @@ class Orchestrator:
             }
             for store in stores
         ]
-        options.append({
-            "label": f"All {cities[0]} stores",
-            "value": cities[0],
-            "values": [str(store["store_name"]) for store in stores],
-            "description": "Use every authorized store in this city",
-        })
         return self._clarification_response(
             session_id=session_id, intent=intent, kind="location_store",
-            prompt=f"I found {len(stores)} stores in {cities[0]}. Which one would you like to check? You can also see all {len(stores)} together.",
+            prompt=f"Which store in {explicit_cities[0]} would you like to check?",
             options=options, usage=usage,
+            original_question=original_question,
         )
 
     def _authorized_entity_suggestions(self, unresolved, user_context: UserContext) -> list[str]:
@@ -1598,6 +1920,11 @@ class Orchestrator:
             self.sessions.clear_pending(session_id)
             pending = None
         resumed_intent, resumed, resume_error = self._resume_pending(question, pending)
+        original_question = (
+            (pending or {}).get("original_question") or question
+            if resumed_intent is not None
+            else question
+        )
         if resume_error:
             return OrchestratorResponse(
                 session_id=session_id,
@@ -1715,6 +2042,7 @@ class Orchestrator:
 
         intent = _leadership_defaults(question, intent, user_context)
         if not option_resumed:
+            intent = _ground_explicit_filters(question, intent, self.resolver)
             intent = _apply_followup_context(question, intent, previous_state)
         intent = _catalog_brand_comparison(question, intent, self.resolver)
         if _has_unsupported_inventory_sales_tradeoff(question):
@@ -1835,6 +2163,7 @@ class Orchestrator:
                     else f"Which metric should I compare across {dimension}: inventory units, inventory value, sales units, or revenue?"
                 ),
                 options=metric_options, usage=usage, interpretation=[],
+                original_question=original_question,
             )
 
         time_issue = _time_window_issue(intent)
@@ -1888,6 +2217,7 @@ class Orchestrator:
                 prompt=time_issue,
                 options=time_options,
                 usage=usage,
+                original_question=original_question,
             )
 
         # Protect previous-result follow-ups from numeric product names
@@ -1926,6 +2256,7 @@ class Orchestrator:
             return self._clarification_response(
                 session_id=session_id, intent=intent, kind="intent",
                 prompt=prompt, options=[], usage=usage,
+                original_question=original_question,
             )
 
         if intent.capability == "out_of_scope":
@@ -2030,6 +2361,7 @@ class Orchestrator:
                     session_id=session_id, intent=intent, kind="entity",
                     prompt=resolution.clarification_question(), options=options,
                     field=field, usage=usage, interpretation=interpretation,
+                    original_question=original_question,
                 )
 
             if resolution.empty:
@@ -2096,6 +2428,7 @@ class Orchestrator:
                         session_id=session_id, intent=intent, kind="scenario_target",
                         prompt=prompt, options=choices, field="products", usage=usage,
                         interpretation=interpretation,
+                        original_question=original_question,
                     )
                 explicit_target = bool(
                     getattr(filters, "products", [])
@@ -2121,32 +2454,57 @@ class Orchestrator:
                         field="products",
                         usage=usage,
                         interpretation=interpretation,
+                        original_question=original_question,
                     )
 
             location_clarification = self._location_clarification(
-                question=question,
                 intent=intent,
                 resolution=resolution,
                 session_id=session_id,
                 previous_state=previous_state,
                 user_context=user_context,
                 usage=usage,
+                original_question=original_question,
             )
             if location_clarification is not None:
                 location_clarification.interpretation = interpretation
                 return location_clarification
 
         # -------------------------------------------------- previous result
+        prior_intent = _stored_intent(previous_state)
+        continuing_prior_scope = bool(
+            getattr(intent, "uses_previous_result", False)
+        )
         prev_product_ids = (
             previous_state.last_product_ids
-            if getattr(intent, "uses_previous_result", False)
-            and not any(getattr(intent.filters, field, []) for field in ("products", "brands", "categories", "subcategories"))
+            if continuing_prior_scope and (
+                _same_filter_scope(
+                    intent.filters,
+                    prior_intent.filters,
+                    ("products", "brands", "categories", "subcategories"),
+                )
+                if prior_intent is not None
+                else not any(
+                    getattr(intent.filters, field, [])
+                    for field in ("products", "brands", "categories", "subcategories")
+                )
+            )
             else None
         )
         prev_store_ids = (
             previous_state.last_store_ids
-            if getattr(intent, "uses_previous_result", False)
-            and not any(getattr(intent.filters, field, []) for field in ("stores", "cities", "regions"))
+            if continuing_prior_scope and (
+                _same_filter_scope(
+                    intent.filters,
+                    prior_intent.filters,
+                    ("stores", "cities", "regions"),
+                )
+                if prior_intent is not None
+                else not any(
+                    getattr(intent.filters, field, [])
+                    for field in ("stores", "cities", "regions")
+                )
+            )
             else None
         )
 
@@ -2199,6 +2557,7 @@ class Orchestrator:
                     options=[],
                     usage=usage,
                     interpretation=interpretation,
+                    original_question=original_question,
                 )
             if snapshot_date != requested_date:
                 return self._clarification_response(
@@ -2215,6 +2574,7 @@ class Orchestrator:
                         "time": {"kind": "exact_date", "date": snapshot_date.isoformat()},
                     }],
                     usage=usage,
+                    original_question=original_question,
                     interpretation=interpretation,
                 )
 
@@ -2485,19 +2845,6 @@ class Orchestrator:
                 .tolist()
             )
 
-        self.sessions.update(
-            session_id,
-            intent=intent,
-            intent_summary=summary,
-            product_ids=result_product_ids,
-            store_ids=result_store_ids,
-        )
-        if resumed:
-            # Consume a valid option only after the complete request has
-            # produced a successful result. Dispatch/narration failures leave
-            # the original pending question available for a safe retry.
-            self.sessions.clear_pending(session_id)
-
         # ---------------------------------------------------------- narrative
         narrative = ""
         narration_verified = False
@@ -2662,10 +3009,28 @@ class Orchestrator:
 
                     narrative = ""
 
-        # Complete the user-facing narrative from canonical intent and result
-        # evidence, then reject claims that fail the capability evidence checks.
-        if False and not is_compound and result.df is not None and not result.df.empty:
+        # Build and shorten the user-facing answer before evidence validation,
+        # keeping technical calculation detail in the Trust Panel.
+        if not is_compound and result.df is not None and not result.df.empty:
             narrative = complete_narrative_context(intent, result.df, narrative)
+
+        historical_notes = [
+            note for note in result.notes
+            if note.startswith("Historical inventory basis:")
+        ]
+        if narrative and historical_notes:
+            match = re.search(
+                r"weekly snapshot (\d{4}-\d{2}-\d{2})",
+                historical_notes[-1],
+            )
+            if match and match.group(1) not in narrative:
+                narrative += (
+                    f" This historical inventory is from the available weekly "
+                    f"count on {match.group(1)}, not an exact month-end count."
+                )
+
+        narrative = concise_leadership_answer(narrative)
+        if not is_compound and result.df is not None and not result.df.empty:
             narrative_errors = validate_narrative_evidence(intent, result.df, narrative)
             if narrative_errors:
                 deterministic_fallback = build_answer(
@@ -2675,8 +3040,8 @@ class Orchestrator:
                     basis=result.basis,
                     rules=self.rules,
                 )
-                deterministic_fallback = complete_narrative_context(
-                    intent, result.df, deterministic_fallback
+                deterministic_fallback = concise_leadership_answer(
+                    complete_narrative_context(intent, result.df, deterministic_fallback)
                 )
                 fallback_errors = validate_narrative_evidence(
                     intent, result.df, deterministic_fallback
@@ -2706,14 +3071,16 @@ class Orchestrator:
                         usage=_usage_or_zero(usage) + _usage_or_zero(narration_usage),
                         response_type="validation_error",
                     )
-
-        # Keep technical SQL boundaries in the Trust Panel. A historical
-        # weekly snapshot is a point-in-time reading, not a date-range total.
-        historical_notes = [n for n in result.notes if n.startswith("Historical inventory basis:")]
-        if narrative and historical_notes:
-            match = re.search(r"weekly snapshot (\d{4}-\d{2}-\d{2})", historical_notes[-1])
-            if match and match.group(1) not in narrative:
-                narrative += f" This historical inventory is from the available weekly count on {match.group(1)}, not an exact month-end count."
+        if not narrative.strip():
+            return OrchestratorResponse(
+                session_id=session_id,
+                status="validation_failed",
+                intent=intent,
+                interpretation=interpretation,
+                usage=_usage_or_zero(usage) + _usage_or_zero(narration_usage),
+                error="The available result could not be turned into a validated analytical answer.",
+                response_type="validation_error",
+            )
 
         total_usage = _usage_or_zero(usage) + _usage_or_zero(narration_usage)
         trust_panel = _trust_panel_payload(
@@ -2763,6 +3130,17 @@ class Orchestrator:
             resolved_context=resolved_context,
             counts=_result_counts(result.df),
         ).as_dict()
+
+        self.sessions.update(
+            session_id,
+            intent=intent,
+            intent_summary=summary,
+            product_ids=result_product_ids,
+            store_ids=result_store_ids,
+            basis=result.basis,
+        )
+        if resumed:
+            self.sessions.clear_pending(session_id)
 
         # ------------------------------------------------------------- result
         return OrchestratorResponse(

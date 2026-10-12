@@ -296,6 +296,45 @@ class EntityResolver:
                 found.append(str(label))
         return sorted(found, key=lambda value: _norm(value))
 
+    def explicit_filter_mentions(self, text: str) -> Filters:
+        """Extract exact catalog entity mentions without relying on the LLM parse."""
+        normalized = f" {_norm(text)} "
+
+        def mentioned(pool: _Pool) -> list[str]:
+            labels = set()
+            for label in pool.ids:
+                candidate = _norm(label)
+                if candidate and f" {candidate} " in normalized:
+                    labels.add(label)
+            for alias, label in pool.aliases.items():
+                candidate = _norm(alias)
+                if candidate and f" {candidate} " in normalized:
+                    labels.add(label)
+            return sorted(labels, key=_norm)
+
+        product_terms = set()
+        for key, product_ids in self.product_pool.by_key.items():
+            if len(key.split()) < 2 and len(key) < 4:
+                continue
+            if f" {key} " in normalized:
+                product_terms.add(key)
+
+        product_labels = []
+        for term in sorted(product_terms, key=lambda value: (len(value), value)):
+            match, _ = self.product_pool.lookup(term)
+            if match:
+                product_labels.append(match[0])
+
+        return Filters(
+            products=list(dict.fromkeys(product_labels)),
+            brands=mentioned(self.pools["brands"]),
+            categories=mentioned(self.pools["categories"]),
+            subcategories=mentioned(self.pools["subcategories"]),
+            stores=mentioned(self.pools["stores"]),
+            cities=mentioned(self.pools["cities"]),
+            regions=mentioned(self.pools["regions"]),
+        )
+
     def store_options(self, authorized_store_ids=None) -> list[dict[str, object]]:
         """List store labels only inside the supplied authorization scope."""
         frame = self.stores.copy()

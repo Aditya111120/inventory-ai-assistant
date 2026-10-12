@@ -11,7 +11,8 @@ from app.dispatch import DispatchResult
 from app.llm.client import Usage
 from app.llm.schema import Filters, Intent, Sort, SubQuestion, TimeWindow
 from app.orchestrator import Orchestrator
-from app.orchestrator import _presentation, _explicitly_requests_multiple_capabilities, _calculation_payload, _leadership_defaults, _catalog_brand_comparison, _apply_followup_context, _has_explicit_time, _has_unsupported_inventory_sales_tradeoff, _dispatch_result_contract_issue
+from app.orchestrator import _presentation, _explicitly_requests_multiple_capabilities, _calculation_payload, _leadership_defaults, _catalog_brand_comparison, _apply_followup_context, _ground_explicit_filters, _has_explicit_time, _has_unsupported_inventory_sales_tradeoff, _dispatch_result_contract_issue
+from app.semantic.resolver import EntityResolver
 from app.session import SessionMemory
 
 
@@ -132,6 +133,19 @@ def make_intent(
         uses_previous_result=uses_previous_result,
         clarification_question=clarification_question,
     )
+
+
+def remember(intent, product_ids=(1,), store_ids=(10,)):
+    sessions = SessionMemory()
+    sessions.update(
+        "context",
+        intent=intent,
+        intent_summary="remembered request",
+        product_ids=list(product_ids) if product_ids is not None else None,
+        store_ids=list(store_ids) if store_ids is not None else None,
+        basis="Actual",
+    )
+    return sessions.get("context")
 
 
 def test_follow_up_highest_sales_uses_previous_result():
@@ -276,6 +290,365 @@ def test_independent_stockout_request_does_not_inherit_historical_period():
     assert result.time.kind == "none"
 
 
+def test_context_reconciliation_replaces_brand_without_retaining_old_product_scope():
+    previous = Intent(
+        capability="excess_slow_moving",
+        inventory_classification="slow_moving_candidate",
+        analysis_scope="store",
+        metrics=["sales_units"],
+        filters=Filters(products=["Lenovo model"], brands=["Lenovo"]),
+        time=TimeWindow(kind="last_n_days", n=30),
+        question_kind="ranking",
+        sort=Sort(by="sales_units", direction="asc"),
+        limit=10,
+    )
+    parsed_intent = Intent(
+        capability="inventory_visibility",
+        metrics=["quantity"],
+        filters=Filters(brands=["Samsung"]),
+    )
+
+    result = _apply_followup_context(
+        "What about Samsung instead?",
+        parsed_intent,
+        remember(previous),
+    )
+
+    assert result.capability == "excess_slow_moving"
+    assert result.inventory_classification == "slow_moving_candidate"
+    assert result.metrics == ["sales_units"]
+    assert result.filters.brands == ["Samsung"]
+    assert result.filters.products == []
+    assert result.time.kind == "last_n_days" and result.time.n == 30
+    assert result.sort.direction == "asc" and result.limit == 10
+    assert result.uses_previous_result is True
+
+
+def test_context_reconciliation_replaces_city_and_clears_incompatible_store():
+    previous = Intent(
+        capability="stockout_risk",
+        metrics=["stockout_risk"],
+        filters=Filters(cities=["Chennai"], stores=["Central"], regions=["South"]),
+        analysis_scope="store",
+    )
+    parsed_intent = Intent(
+        capability="inventory_visibility",
+        metrics=["quantity"],
+        filters=Filters(cities=["Mumbai"]),
+    )
+
+    result = _apply_followup_context(
+        "What about Mumbai?",
+        parsed_intent,
+        remember(previous),
+    )
+
+    assert result.capability == "stockout_risk"
+    assert result.filters.cities == ["Mumbai"]
+    assert result.filters.stores == []
+    assert result.filters.regions == []
+
+
+def test_context_reconciliation_preserves_sales_metric_when_brand_changes():
+    previous = Intent(
+        capability="sales_trend",
+        metrics=["sales_revenue"],
+        filters=Filters(brands=["Lenovo"]),
+        time=TimeWindow(kind="month", month=8, year=2026),
+        group_by="brand",
+    )
+    parsed_intent = Intent(
+        capability="inventory_visibility",
+        metrics=["quantity"],
+        filters=Filters(brands=["Samsung"]),
+    )
+
+    result = _apply_followup_context(
+        "What about Samsung?",
+        parsed_intent,
+        remember(previous),
+    )
+
+    assert result.capability == "sales_trend"
+    assert result.metrics == ["sales_revenue"]
+    assert result.filters.brands == ["Samsung"]
+    assert (result.time.month, result.time.year) == (8, 2026)
+
+
+def test_context_reconciliation_replaces_reporting_period():
+    previous = Intent(
+        capability="sales_trend",
+        metrics=["sales_revenue"],
+        filters=Filters(brands=["Samsung"]),
+        time=TimeWindow(kind="month", month=8, year=2026),
+    )
+    parsed_intent = Intent(
+        capability="inventory_visibility",
+        metrics=["quantity"],
+        filters=Filters(),
+        time=TimeWindow(kind="month", month=9, year=2026),
+    )
+
+    result = _apply_followup_context(
+        "What about September 2026?",
+        parsed_intent,
+        remember(previous),
+    )
+
+    assert result.capability == "sales_trend"
+    assert result.metrics == ["sales_revenue"]
+    assert result.filters.brands == ["Samsung"]
+    assert (result.time.month, result.time.year) == (9, 2026)
+
+
+@pytest.mark.parametrize(
+    ("question", "previous_filters", "expected_field", "expected_value"),
+    [
+        ("What about Lenovo?", Filters(brands=["Apple"]), "brands", "Lenovo"),
+        (
+            "What about Lenovo Laptop LEN-LAP-1?",
+            Filters(products=["Apple Phone APP-PHN-1"]),
+            "products",
+            "Lenovo Laptop LEN-LAP-1",
+        ),
+        (
+            "What about Laptops?",
+            Filters(categories=["Smartphones"]),
+            "categories",
+            "Laptops",
+        ),
+        (
+            "What about Mumbai?",
+            Filters(cities=["Chennai"], stores=["T Nagar"]),
+            "cities",
+            "Mumbai",
+        ),
+        (
+            "What about Bandra?",
+            Filters(cities=["Chennai"], stores=["T Nagar"]),
+            "stores",
+            "Bandra",
+        ),
+    ],
+)
+def test_unparsed_catalog_filter_replaces_prior_scope(
+    question, previous_filters, expected_field, expected_value
+):
+    products = pd.DataFrame(
+        [
+            {
+                "product_id": 1, "sku": "SKU-1",
+                "product_name": "Lenovo Laptop LEN-LAP-1", "brand": "Lenovo",
+                "category": "Laptops", "model": "LEN-LAP-1",
+            },
+            {
+                "product_id": 2, "sku": "SKU-2",
+                "product_name": "Apple Phone APP-PHN-1", "brand": "Apple",
+                "category": "Smartphones", "model": "APP-PHN-1",
+            },
+        ]
+    )
+    stores = pd.DataFrame(
+        [
+            {"store_id": 10, "store_name": "T Nagar", "city": "Chennai", "region": "South"},
+            {"store_id": 11, "store_name": "Bandra", "city": "Mumbai", "region": "West"},
+        ]
+    )
+    resolver = EntityResolver(products, stores)
+    prior = Intent(
+        capability="excess_slow_moving",
+        inventory_classification="slow_moving_candidate",
+        metrics=["sales_units"],
+        filters=previous_filters,
+        time=TimeWindow(kind="last_n_days", n=30),
+        analysis_scope="store",
+    )
+    sessions = SessionMemory()
+    sessions.update(
+        "filter-replacement",
+        intent=prior,
+        intent_summary="prior slow-moving analysis",
+        product_ids=[2],
+        store_ids=[10],
+        basis="Actual",
+    )
+    parsed_intent = Intent(
+        capability="inventory_visibility",
+        metrics=["quantity"],
+        filters=Filters(),
+    )
+
+    grounded = _ground_explicit_filters(question, parsed_intent, resolver)
+    result = _apply_followup_context(
+        question, grounded, sessions.get("filter-replacement")
+    )
+    resolution = resolver.resolve(result.filters)
+
+    assert getattr(result.filters, expected_field) == [expected_value]
+    assert resolution.ok and not resolution.empty
+    assert result.capability == "excess_slow_moving"
+    assert result.inventory_classification == "slow_moving_candidate"
+    if expected_field == "cities":
+        assert result.filters.stores == []
+        assert resolution.store_ids == [11]
+    elif expected_field == "stores":
+        assert result.filters.cities == []
+        assert resolution.store_ids == [11]
+    elif expected_field in {"brands", "products", "categories"}:
+        assert resolution.product_ids == [1]
+
+
+def test_unparsed_explicit_period_replaces_previous_period():
+    previous = Intent(
+        capability="sales_trend",
+        metrics=["sales_revenue"],
+        filters=Filters(brands=["Lenovo"]),
+        time=TimeWindow(kind="month", month=8, year=2026),
+    )
+    sessions = SessionMemory()
+    sessions.update(
+        "period-replacement",
+        intent=previous,
+        intent_summary="prior sales request",
+        product_ids=[1],
+        store_ids=None,
+        basis="Actual",
+    )
+    parsed_intent = Intent(
+        capability="inventory_visibility",
+        metrics=["quantity"],
+        filters=Filters(),
+    )
+
+    grounded = _ground_explicit_filters(
+        "What about September 2026?", parsed_intent, FakeResolver(FakeResolution())
+    )
+    result = _apply_followup_context(
+        "What about September 2026?",
+        grounded,
+        sessions.get("period-replacement"),
+    )
+
+    assert result.capability == "sales_trend"
+    assert result.metrics == ["sales_revenue"]
+    assert result.filters.brands == ["Lenovo"]
+    assert (result.time.kind, result.time.month, result.time.year) == (
+        "month", 9, 2026
+    )
+
+
+def test_context_reconciliation_changes_grouping_and_sort_direction():
+    previous = Intent(
+        capability="inventory_visibility",
+        metrics=["inventory_value"],
+        filters=Filters(categories=["Laptops"]),
+        group_by="category",
+        question_kind="ranking",
+        sort=Sort(by="inventory_value", direction="desc"),
+        limit=5,
+    )
+    grouped = _apply_followup_context(
+        "Now group by city",
+        Intent(capability="inventory_visibility", metrics=["quantity"], filters=Filters(), group_by="city"),
+        remember(previous),
+    )
+    sorted_result = _apply_followup_context(
+        "Now ascending",
+        Intent(capability="inventory_visibility", metrics=["quantity"], filters=Filters()),
+        remember(previous),
+    )
+
+    assert grouped.group_by == "city"
+    assert grouped.metrics == ["inventory_value"]
+    assert grouped.filters.categories == ["Laptops"]
+    assert sorted_result.sort.by == "inventory_value"
+    assert sorted_result.sort.direction == "asc"
+    assert sorted_result.question_kind == "ranking"
+
+
+def test_context_reconciliation_organization_scope_clears_prior_location():
+    previous = Intent(
+        capability="sales_trend",
+        metrics=["sales_revenue"],
+        filters=Filters(cities=["Chennai"], stores=["Central"]),
+        analysis_scope="store",
+    )
+    parsed_intent = Intent(
+        capability="sales_trend",
+        metrics=["sales_revenue"],
+        filters=Filters(),
+        analysis_scope="organization",
+    )
+
+    result = _apply_followup_context(
+        "Now show company-wide sales",
+        parsed_intent,
+        remember(previous),
+    )
+
+    assert result.analysis_scope == "organization"
+    assert result.filters.cities == []
+    assert result.filters.stores == []
+    assert result.uses_previous_result is False
+
+
+def test_context_reconciliation_retains_target_for_new_what_if_operation():
+    previous = Intent(
+        capability="inventory_visibility",
+        metrics=["quantity"],
+        filters=Filters(products=["Example laptop"]),
+    )
+    parsed_intent = Intent(
+        capability="what_if",
+        metrics=["days_of_inventory"],
+        filters=Filters(),
+        scenario={"kind": "demand_change_pct", "value": 20},
+        question_kind="scenario",
+    )
+
+    result = _apply_followup_context(
+        "What if demand increases by 20%?",
+        parsed_intent,
+        remember(previous),
+    )
+
+    assert result.capability == "what_if"
+    assert result.metrics == ["days_of_inventory"]
+    assert result.filters.products == ["Example laptop"]
+    assert result.scenario.value == 20
+    assert result.question_kind == "scenario"
+    assert result.uses_previous_result is True
+
+
+def test_independent_new_request_does_not_inherit_prior_filters_or_metrics():
+    previous = Intent(
+        capability="sales_trend",
+        metrics=["sales_revenue"],
+        filters=Filters(brands=["Samsung"], cities=["Chennai"]),
+        time=TimeWindow(kind="month", month=8, year=2026),
+    )
+    parsed_intent = Intent(
+        capability="stockout_risk",
+        metrics=["stockout_risk"],
+        filters=Filters(cities=["Mumbai"]),
+        time=TimeWindow(kind="month", month=8, year=2026),
+        uses_previous_result=True,
+    )
+
+    result = _apply_followup_context(
+        "Show stockout risk in Mumbai",
+        parsed_intent,
+        remember(previous),
+    )
+
+    assert result.capability == "stockout_risk"
+    assert result.metrics == ["stockout_risk"]
+    assert result.filters.cities == ["Mumbai"]
+    assert result.filters.brands == []
+    assert result.time.kind == "none"
+    assert result.uses_previous_result is False
+
+
 @pytest.mark.parametrize("period", ["September", "Sep", "September 2026", "2026-09-14"])
 def test_explicit_period_is_not_mistaken_for_stale_context(period):
     assert _has_explicit_time(f"Show sales in {period}")
@@ -384,27 +757,217 @@ def test_unsupported_inventory_sales_tradeoff_stops_before_query(monkeypatch, ba
     assert base_components["queries"].as_of_calls == 0
 
 
-def test_leadership_particular_store_asks_for_a_catalog_store():
+def test_store_scoped_capability_asks_for_authorized_city_without_phrase_matching():
     resolver = FakeResolver(FakeResolution())
-    resolver.store_options = lambda authorized: [
-        {"store_name": "North", "city": "Pune"},
-        {"store_name": "Central", "city": "Delhi"},
+    resolver.location_options = lambda authorized: [
+        {"city": "Pune", "store_count": 1},
+        {"city": "Delhi", "store_count": 2},
     ]
     orchestrator = Orchestrator(
         llm=FakeLLM(), queries=FakeQueries(), resolver=resolver, rules=Rules(),
         session_memory=SessionMemory(),
     )
     response = orchestrator._location_clarification(
-        question="Show inventory at a particular store",
-        intent=make_intent("inventory_visibility"),
+        intent=make_intent("excess_slow_moving").model_copy(
+            update={"analysis_scope": "store"}
+        ),
         resolution=FakeResolution(), session_id="leadership-store-choice",
         previous_state=SessionMemory().get("leadership-store-choice"),
         user_context=UserContext(persona="Leadership", authorized_store_ids=(1, 2)),
         usage=Usage(calls=0),
     )
     assert response.status == "clarification"
-    assert response.clarification_prompt == "Which store would you like to check?"
-    assert {option["label"] for option in response.clarification_options} == {"North", "Central"}
+    assert response.clarification_prompt == "Which city would you like to check?"
+    assert {option["label"] for option in response.clarification_options} == {"Pune", "Delhi"}
+
+
+def test_slow_moving_city_selection_offers_only_authorized_stores(monkeypatch):
+    intent = Intent(
+        capability="excess_slow_moving",
+        inventory_classification="slow_moving_candidate",
+        analysis_scope="store",
+        metrics=["sales_units"],
+        filters=Filters(cities=["Pune"]),
+    )
+    resolver = FakeResolver(FakeResolution(product_ids=[1], store_ids=[10, 11]))
+    resolver.city_store_options = lambda city, authorized: [
+        {"store_id": store_id, "store_name": f"Store {store_id}", "city": city}
+        for store_id in (10, 11, 99)
+        if authorized is None or store_id in authorized
+    ]
+    monkeypatch.setattr(
+        "app.orchestrator.parse_intent",
+        lambda question, llm, context="": parsed(intent),
+    )
+    orchestrator = Orchestrator(
+        llm=FakeLLM(), queries=FakeQueries(), resolver=resolver, rules=Rules(),
+        session_memory=SessionMemory(),
+        dispatch_fn=lambda **kwargs: pytest.fail("city clarification must not dispatch"),
+    )
+
+    response = orchestrator.handle(
+        "Which products are slow-moving in Pune?",
+        "slow-moving-city",
+        UserContext(persona="Leadership", authorized_store_ids=(10, 11)),
+    )
+
+    assert response.status == "clarification"
+    assert response.clarification_kind == "location_store"
+    assert [option["label"] for option in response.clarification_options] == [
+        "Store 10", "Store 11",
+    ]
+
+
+def test_unscoped_slow_moving_request_clarifies_city_before_dispatch(monkeypatch):
+    intent = Intent(
+        capability="excess_slow_moving",
+        inventory_classification="slow_moving_candidate",
+        analysis_scope="store",
+        metrics=["sales_units"],
+        filters=Filters(),
+    )
+    resolver = FakeResolver(FakeResolution(product_ids=[1], store_ids=None))
+    resolver.location_options = lambda authorized: [
+        {"city": f"Authorized city {store_id}", "store_count": 1}
+        for store_id in authorized
+    ]
+    monkeypatch.setattr(
+        "app.orchestrator.parse_intent",
+        lambda question, llm, context="": parsed(intent),
+    )
+    orchestrator = Orchestrator(
+        llm=FakeLLM(), queries=FakeQueries(), resolver=resolver, rules=Rules(),
+        session_memory=SessionMemory(),
+        dispatch_fn=lambda **kwargs: pytest.fail("city clarification must precede dispatch"),
+    )
+
+    response = orchestrator.handle(
+        "Which products are slow-moving?",
+        "slow-moving-unscoped",
+        UserContext(persona="Leadership", authorized_store_ids=(10, 11)),
+    )
+
+    assert response.status == "clarification"
+    assert response.clarification_kind == "location"
+    assert response.clarification_prompt == "Which city would you like to check?"
+    assert [option["label"] for option in response.clarification_options] == [
+        "Authorized city 10", "Authorized city 11",
+    ]
+    assert resolver.calls == [intent.filters]
+
+
+def test_slow_moving_contract_accepts_sales_units_window_not_sales_aggregate():
+    intent = Intent(
+        capability="excess_slow_moving",
+        inventory_classification="slow_moving_candidate",
+        analysis_scope="store",
+        metrics=["sales_units"],
+        filters=Filters(),
+    )
+    frame = pd.DataFrame([{
+        "product_id": 1,
+        "store_id": 10,
+        "product_name": "Example laptop",
+        "units_sold_window": 2,
+        "demand_status": "Slow-moving Candidate",
+    }])
+
+    assert _dispatch_result_contract_issue(intent, frame) is None
+
+
+def test_sales_contract_requires_aggregate_units_not_inventory_window_units():
+    intent = Intent(
+        capability="sales_trend",
+        metrics=["sales_units"],
+        filters=Filters(),
+    )
+    frame = pd.DataFrame([{"units_sold_window": 2}])
+
+    issue = _dispatch_result_contract_issue(intent, frame)
+
+    assert issue is not None
+    assert "units" in issue
+
+
+def test_slow_moving_lookup_presentation_keeps_sales_window_evidence():
+    intent = Intent(
+        capability="excess_slow_moving",
+        inventory_classification="slow_moving_candidate",
+        analysis_scope="store",
+        metrics=["sales_units"],
+        filters=Filters(),
+        question_kind="lookup",
+    )
+    frame = pd.DataFrame([{
+        "product_name": "Example laptop",
+        "store_name": "Central",
+        "city": "Pune",
+        "quantity_on_hand": 8,
+        "units_sold_window": 2,
+        "demand_status": "Slow-moving Candidate",
+        "days_of_inventory": 12.0,
+        "inventory_snapshot_date": "2026-09-30",
+    }])
+
+    view, display = _presentation(frame, intent)
+
+    assert "units_sold_window" in view.columns
+    assert view.iloc[0]["units_sold_window"] == 2
+    assert display["type"] == "lookup"
+
+
+def test_explicit_store_slow_moving_request_generates_answer_and_evidence_table(monkeypatch):
+    intent = Intent(
+        capability="excess_slow_moving",
+        inventory_classification="slow_moving_candidate",
+        analysis_scope="store",
+        metrics=["sales_units"],
+        filters=Filters(stores=["Central"]),
+        question_kind="lookup",
+    )
+    frame = pd.DataFrame([{
+        "product_id": 1,
+        "store_id": 10,
+        "product_name": "Example laptop",
+        "brand": "Example",
+        "category": "Laptops",
+        "subcategory": "Notebook",
+        "store_name": "Central",
+        "city": "Pune",
+        "region": "West",
+        "quantity_on_hand": 8,
+        "units_sold_window": 2,
+        "demand_status": "Slow-moving Candidate",
+        "days_of_inventory": 12.0,
+        "inventory_snapshot_date": "2026-09-30",
+    }])
+    result = DispatchResult(
+        df=frame, sql=["SELECT ..."], params=[], notes=[], basis="Actual",
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.parse_intent",
+        lambda question, llm, context="": parsed(intent),
+    )
+    orchestrator = Orchestrator(
+        llm=FakeLLM(),
+        queries=FakeQueries(),
+        resolver=FakeResolver(FakeResolution(product_ids=[1], store_ids=[10])),
+        rules=Rules(),
+        session_memory=SessionMemory(),
+        dispatch_fn=lambda **kwargs: result,
+    )
+
+    response = orchestrator.handle(
+        "Which products are slow-moving at Central?",
+        "slow-moving-explicit-store",
+        UserContext(persona="Leadership", authorized_store_ids=(10,)),
+    )
+
+    assert response.status == "ok"
+    assert "2" in response.narrative
+    assert response.basis == "Actual"
+    assert "units_sold_window" in response.data.columns
+    assert list(response.data["demand_status"]) == ["Slow-moving Candidate"]
 
 
 def test_executive_summary_presentation_uses_aggregated_categories_and_scalar_kpis():
@@ -739,6 +1302,169 @@ def test_successful_inventory_request(monkeypatch, base_components):
     assert state.last_product_ids == [1]
     assert state.last_store_ids == [10]
     assert "capability=inventory_visibility" in state.last_intent_summary
+
+
+def test_brand_followup_replaces_previous_product_ids_before_dispatch(monkeypatch, base_components):
+    first_intent = Intent(
+        capability="sales_trend",
+        metrics=["sales_revenue"],
+        filters=Filters(brands=["Lenovo"]),
+    )
+    replacement_intent = Intent(
+        capability="inventory_visibility",
+        metrics=["quantity"],
+        filters=Filters(),
+    )
+    intents = iter([first_intent, replacement_intent])
+    monkeypatch.setattr(
+        "app.orchestrator.parse_intent",
+        lambda question, llm, context="": parsed(next(intents)),
+    )
+    resolver = FakeResolver(FakeResolution(product_ids=[1], store_ids=[10]))
+    resolver.explicit_filter_mentions = lambda question: Filters(
+        brands=["Samsung"] if "samsung" in question.casefold() else []
+    )
+    captured = []
+    orchestrator = Orchestrator(
+        llm=base_components["llm"],
+        queries=base_components["queries"],
+        resolver=resolver,
+        rules=base_components["rules"],
+        session_memory=base_components["sessions"],
+        dispatch_fn=lambda **kwargs: (
+            captured.append(kwargs) or make_dispatch_result()
+        ),
+    )
+
+    assert orchestrator.handle("Show Lenovo sales revenue", "brand-followup").status == "ok"
+    response = orchestrator.handle("What about Samsung?", "brand-followup")
+
+    assert response.status == "ok"
+    assert captured[0]["intent"].capability == "sales_trend"
+    assert captured[1]["intent"].capability == "sales_trend"
+    assert captured[1]["intent"].metrics == ["sales_revenue"]
+    assert captured[1]["intent"].filters.brands == ["Samsung"]
+    assert captured[1]["prev_product_ids"] is None
+    assert base_components["sessions"].get("brand-followup").last_intent["filters"]["brands"] == ["Samsung"]
+
+
+def test_failed_followup_does_not_overwrite_last_successful_context(monkeypatch, base_components):
+    intents = iter([
+        make_intent("inventory_visibility"),
+        make_intent("sales_trend"),
+    ])
+    monkeypatch.setattr(
+        "app.orchestrator.parse_intent",
+        lambda question, llm, context="": parsed(next(intents)),
+    )
+    calls = 0
+
+    def dispatch_result(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return make_dispatch_result()
+        raise ValueError("simulated dispatch failure")
+
+    orchestrator = Orchestrator(
+        llm=base_components["llm"],
+        queries=base_components["queries"],
+        resolver=FakeResolver(FakeResolution(product_ids=[1], store_ids=[10])),
+        rules=base_components["rules"],
+        session_memory=base_components["sessions"],
+        dispatch_fn=dispatch_result,
+    )
+
+    first = orchestrator.handle("Show laptop inventory", "failure-recovery")
+    state = base_components["sessions"].get("failure-recovery")
+    committed_intent = dict(state.last_intent)
+    committed_products = list(state.last_product_ids)
+    committed_stores = list(state.last_store_ids)
+    committed_basis = state.last_basis
+    failed = orchestrator.handle("Show sales revenue", "failure-recovery")
+
+    assert first.status == "ok"
+    assert failed.status == "error"
+    assert state.last_intent == committed_intent
+    assert state.last_product_ids == committed_products
+    assert state.last_store_ids == committed_stores
+    assert state.last_basis == committed_basis
+
+
+def test_empty_followup_does_not_overwrite_last_successful_context(monkeypatch, base_components):
+    intents = iter([
+        make_intent("inventory_visibility"),
+        make_intent("inventory_visibility"),
+    ])
+    monkeypatch.setattr(
+        "app.orchestrator.parse_intent",
+        lambda question, llm, context="": parsed(next(intents)),
+    )
+    results = iter([
+        make_dispatch_result(),
+        DispatchResult(df=pd.DataFrame(), sql=["SELECT ..."], params=[], notes=[], basis="Actual"),
+    ])
+    orchestrator = Orchestrator(
+        llm=base_components["llm"],
+        queries=base_components["queries"],
+        resolver=FakeResolver(FakeResolution(product_ids=[1], store_ids=[10])),
+        rules=base_components["rules"],
+        session_memory=base_components["sessions"],
+        dispatch_fn=lambda **kwargs: next(results),
+    )
+
+    first = orchestrator.handle("Show inventory", "empty-recovery")
+    state = base_components["sessions"].get("empty-recovery")
+    committed_intent = dict(state.last_intent)
+    empty = orchestrator.handle("Show another inventory slice", "empty-recovery")
+
+    assert first.status == "ok"
+    assert empty.status == "no_results"
+    assert state.last_intent == committed_intent
+
+
+def test_city_replacement_rechecks_authorization_before_dispatch(monkeypatch):
+    sessions = SessionMemory()
+    previous = Intent(
+        capability="stockout_risk",
+        metrics=["stockout_risk"],
+        filters=Filters(cities=["Chennai"]),
+    )
+    sessions.update(
+        "authorized-city",
+        intent=previous,
+        intent_summary="stockout risk",
+        product_ids=[1],
+        store_ids=[10],
+        basis="Actual",
+    )
+    parsed_intent = Intent(
+        capability="inventory_visibility",
+        metrics=["quantity"],
+        filters=Filters(cities=["Mumbai"]),
+    )
+    monkeypatch.setattr(
+        "app.orchestrator.parse_intent",
+        lambda question, llm, context="": parsed(parsed_intent),
+    )
+    orchestrator = Orchestrator(
+        llm=FakeLLM(),
+        queries=FakeQueries(),
+        resolver=FakeResolver(FakeResolution(product_ids=[1], store_ids=[99])),
+        rules=Rules(),
+        session_memory=sessions,
+        dispatch_fn=lambda **kwargs: pytest.fail("unauthorized city must not dispatch"),
+    )
+
+    response = orchestrator.handle(
+        "What about Mumbai?",
+        "authorized-city",
+        UserContext(persona="Leadership", authorized_store_ids=(10,)),
+    )
+
+    assert response.status == "out_of_scope"
+    assert "not authorized" in response.error
+    assert sessions.get("authorized-city").last_intent["filters"]["cities"] == ["Chennai"]
 
 
 def test_clarification_intent_does_not_resolve_or_dispatch(monkeypatch, base_components):
@@ -1541,5 +2267,3 @@ def test_narration_failure_does_not_destroy_result(monkeypatch, base_components)
     assert response.row_count == 1
     assert "38 units are available" in response.narrative
     assert narrator.calls == []
-
-

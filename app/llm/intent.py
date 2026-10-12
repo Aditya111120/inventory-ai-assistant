@@ -34,6 +34,7 @@ _SCHEMA = strict_json_schema(Intent)
 _NOT_NULLABLE_TOP = (
     "metrics",
     "filters",
+    "analysis_scope",
     "time",
     "comparison_mode",
     "question_kind",
@@ -99,6 +100,160 @@ def parse_intent(question: str, llm, context: str = "") -> ParsedIntent:
 def _normalise(intent: Intent, question: str = "") -> Intent:
     """Apply semantic rules the model must not be allowed to override."""
     text = question.casefold()
+    can_normalize_analytical_request = intent.capability not in {
+        "clarification", "out_of_scope",
+    }
+    explicit_organization_scope = bool(re.search(
+        r"\b(?:company[- ]wide|organization[- ]wide|across all authorized stores|"
+        r"across all stores|all stores|entire organization|whole organization)\b",
+        text,
+    ))
+    if explicit_organization_scope and not any(
+        getattr(intent.filters, field, [])
+        for field in ("stores", "cities", "regions")
+    ):
+        intent.analysis_scope = "organization"
+
+    # Normalize clear operational language to the existing validated intent
+    # contract. Filters and time are left untouched so entity resolution and
+    # the follow-up/clarification flows remain authoritative.
+    no_sales_request = bool(re.search(
+        r"\b(?:no|zero|without)\s+(?:recorded\s+)?(?:sales|sales units)\b"
+        r"|\bno[- ]sales\b|\bnever sold\b|\bnot sold\b",
+        text,
+    ))
+    slow_moving_request = bool(re.search(
+        r"\bslow[- ]moving\b|\bslow movers?\b|\bslow sellers?\b",
+        text,
+    ))
+    excess_request = bool(re.search(
+        r"\b(?:excess|excessive)\s+(?:inventory|stock|coverage)\b"
+        r"|\boverstock(?:ed|ing)?\b|\btoo much stock\b",
+        text,
+    ))
+    excess_coverage_request = bool(re.search(
+        r"\b(?:excess|excessive)\s+coverage\b|\bexcess coverage candidate\b",
+        text,
+    ))
+    excess_level_request = bool(re.search(
+        r"\b(?:above|over|exceeding)\s+(?:the\s+)?(?:maximum|max)\s+(?:stock\s+)?level\b"
+        r"|\b(?:above|over)\s+max(?:imum)?\b",
+        text,
+    ))
+    stockout_request = bool(re.search(
+        r"\bstock[- ]?out\b|\brun(?:ning)?\s+out\s+of\s+stock\b"
+        r"|\bdepletion\s+risk\b",
+        text,
+    ))
+    sales_request = bool(re.search(
+        r"\b(?:sales?|sold|revenue|turnover)\b",
+        text,
+    ))
+    explicit_revenue = bool(re.search(
+        r"\b(?:revenue|turnover|sales value)\b",
+        text,
+    ))
+    inventory_request = bool(re.search(
+        r"\b(?:inventory|stock|on[- ]hand|on hand|quantity)\b",
+        text,
+    ))
+
+    if can_normalize_analytical_request and (
+        no_sales_request or slow_moving_request or excess_request or excess_level_request
+    ):
+        if no_sales_request:
+            intent.inventory_classification = "no_recorded_sales"
+        elif slow_moving_request:
+            intent.inventory_classification = "slow_moving_candidate"
+        elif excess_level_request:
+            intent.inventory_classification = "excess_by_max_level"
+        elif excess_coverage_request:
+            intent.inventory_classification = "excess_coverage_candidate"
+        else:
+            # Generic excess wording keeps the established null-subtype
+            # behavior; it does not select or redefine an excess rule.
+            intent.inventory_classification = None
+        intent.capability = "excess_slow_moving"
+        intent.question_kind = "ranking" if re.search(
+            r"\b(?:top|bottom|highest|lowest|rank|ranking|most|least)\b", text,
+        ) else "lookup"
+        intent.metrics = ["sales_units"] if intent.inventory_classification in {
+            "slow_moving_candidate", "no_recorded_sales",
+        } else ["quantity"]
+        if (
+            intent.inventory_classification in {
+                "slow_moving_candidate", "no_recorded_sales",
+            }
+            and intent.analysis_scope != "organization"
+            and not (intent.group_by in {"brand", "category", "city", "region", "store"})
+        ):
+            intent.analysis_scope = "store"
+    elif can_normalize_analytical_request and stockout_request:
+        intent.capability = "stockout_risk"
+        intent.metrics = ["stockout_risk"]
+        if re.search(r"\b(?:top|bottom|highest|lowest|rank|ranking|most|least)\b", text):
+            intent.question_kind = "ranking"
+    elif can_normalize_analytical_request and sales_request and not inventory_request:
+        intent.capability = "sales_trend"
+        if explicit_revenue:
+            intent.metrics = ["sales_revenue"]
+        elif re.search(r"\b(?:growth|change|increase|decrease|trend)\b", text):
+            intent.metrics = ["sales_growth_pct"]
+        else:
+            intent.metrics = ["sales_units"]
+    elif can_normalize_analytical_request and inventory_request and not sales_request and not no_sales_request:
+        explicit_visibility_request = bool(re.search(
+            r"\b(?:current|currently|on[- ]hand|quantity on hand|inventory level)\b"
+            r"|\bhow much\b|\b(?:compare|comparison|versus|vs\.?)\b",
+            text,
+        ))
+        explicit_health_request = bool(re.search(
+            r"\b(?:health|attention|exception|below reorder|at or below reorder|"
+            r"low stock|low inventory|healthy stock)\b",
+            text,
+        ))
+        if (
+            intent.capability not in {"stockout_risk", "what_if"}
+            and not explicit_health_request
+        ):
+            intent.capability = "inventory_visibility"
+            if explicit_visibility_request or not intent.metrics:
+                intent.metrics = ["quantity"]
+
+    # A catalog browse is an inventory-backed grouped lookup, not a new query
+    # capability. Keep it distinct from metric comparisons so the whole list
+    # remains available to the existing result table.
+    catalog_discovery = bool(re.search(
+        r"\b(?:what|which|show|list|browse)\b.{0,50}"
+        r"\b(?:products?|brands?|categories|subcategories|items?)\b"
+        r".{0,40}\b(?:carry|stock|catalog|available|offer|have)\b"
+        r"|\b(?:available|carried|in stock)\s+"
+        r"(?:products?|brands?|categories|subcategories|items?)\b"
+        r"|\b(?:catalog|product range|assortment)\b",
+        text,
+    ))
+    if (
+        can_normalize_analytical_request
+        and catalog_discovery and not sales_request and not stockout_request
+    ):
+        dimension = None
+        for pattern, candidate in (
+            (r"\bsubcategories?\b", "subcategory"),
+            (r"\bcategories\b|\bcategory\b", "category"),
+            (r"\bbrands?\b", "brand"),
+            (r"\bproducts?\b|\bitems?\b", "product"),
+        ):
+            if re.search(pattern, text):
+                dimension = candidate
+                break
+        if dimension:
+            intent.capability = "inventory_visibility"
+            intent.metrics = ["quantity"]
+            intent.group_by = dimension
+            intent.question_kind = "lookup"
+            intent.sort = None
+            intent.limit = None
+
     # Preserve two explicitly named calendar months as a period comparison;
     # do not collapse the pair to one month or infer an adjacent period.
     month_years = []
@@ -165,7 +320,10 @@ def _normalise(intent: Intent, question: str = "") -> Intent:
     # Comparison wording is a semantic guarantee, not an LLM preference.  In
     # particular, prevent a previous-result explanation from turning a fresh
     # "between X and Y" question into a lookup against stale context.
-    comparison_word = re.search(r"\b(?:compare|comparison|versus|vs\.?)\b", text)
+    comparison_word = re.search(
+        r"\b(?:compare|comparison|compared\s+(?:with|to)|versus|vs\.?|side[- ]by[- ]side)\b",
+        text,
+    )
     between_entities = re.search(r"\bbetween\b", text) and not re.search(
         r"\b(?:19|20)\d{2}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b|\b\d{4}-\d{2}-\d{2}\b",
         text,
@@ -173,11 +331,57 @@ def _normalise(intent: Intent, question: str = "") -> Intent:
     if comparison_word or between_entities:
         intent.question_kind = "comparison"
         intent.uses_previous_result = False
+        if intent.group_by is None:
+            grouped_filters = [
+                (field, dimension)
+                for field, dimension in (
+                    ("products", "product"),
+                    ("brands", "brand"),
+                    ("categories", "category"),
+                    ("subcategories", "subcategory"),
+                    ("stores", "store"),
+                    ("cities", "city"),
+                    ("regions", "region"),
+                )
+                if len(getattr(intent.filters, field, []) or []) > 1
+            ]
+            if len(grouped_filters) == 1:
+                intent.group_by = grouped_filters[0][1]
+
+    if intent.group_by is None:
+        for pattern, dimension in (
+            (r"\bby\s+(?:product|products|item|items)\b", "product"),
+            (r"\bby\s+brands?\b", "brand"),
+            (r"\bby\s+categories\b|\bby\s+category\b", "category"),
+            (r"\bby\s+subcategories\b|\bby\s+subcategory\b", "subcategory"),
+            (r"\bby\s+stores?\b", "store"),
+            (r"\bby\s+cities\b|\bby\s+city\b", "city"),
+            (r"\bby\s+regions?\b", "region"),
+        ):
+            if re.search(pattern, text):
+                intent.group_by = dimension
+                break
+
+    # Preserve ambiguity for the existing metric clarification flow instead of
+    # selecting an arbitrary definition of "best" or "performance".
+    ambiguous_store_performance = bool(
+        re.search(r"\b(?:which|what)\b.{0,25}\b(?:stores?|locations?)\b", text)
+        and re.search(r"\b(?:perform(?:ed|ing)?|performance|best|top)\b", text)
+        and not re.search(r"\b(?:revenue|turnover|sales|units|inventory value)\b", text)
+    )
+    if ambiguous_store_performance:
+        intent.capability = "sales_trend"
+        intent.question_kind = "comparison"
+        intent.group_by = "store"
+        intent.metrics = []
+        intent.sort = None
+        intent.limit = None
 
     # A zero-stock request is an equality predicate on the operational
     # product-store grain.  Keep this deterministic so an omitted/incorrect
     # threshold from the model cannot broaden the result to all inventory.
-    if re.search(
+    run_out_risk = bool(re.search(r"\b(?:run|running)\s+out\s+of\s+stock\b", text))
+    if not run_out_risk and re.search(
         r"\b(?:zero stock|out of stock|no stock|zero inventory|without stock)\b",
         text,
     ):

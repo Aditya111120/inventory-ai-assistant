@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 from app.api import create_app
 from app.history import ConversationStore
 from app.auth import AuthenticatedUser, AuthorizedScope
+from app.llm.schema import Filters, Intent, TimeWindow
+from app.session import SessionMemory
 
 
 class FakeResponse:
@@ -321,6 +323,71 @@ def test_chat_returns_table_and_trust_panel():
     ]
     assert body["response"]["display_rows"] == body["table"]
     assert body["response"]["has_more"] is False
+
+
+def test_chat_restores_last_successful_structured_context_from_history():
+    store = ConversationStore(f"test-context-{uuid4().hex}.sqlite3")
+    store.ensure_conversation("demo-sai", "Sai", "Leadership", "resume-context")
+    prior_intent = Intent(
+        capability="sales_trend",
+        metrics=["sales_revenue"],
+        filters=Filters(brands=["Example"], cities=["Pune"]),
+        time=TimeWindow(kind="month", month=9, year=2026),
+    )
+    store.add_message(
+        "resume-context",
+        "assistant",
+        "Prior answer",
+        {
+            "status": "ok",
+            "intent": prior_intent.model_dump(),
+            "resolved_context": {
+                "product_scope": {"product_ids": [4, 5]},
+                "location_scope": {"store_ids": [12]},
+            },
+            "basis": "Simulated",
+        },
+    )
+
+    class ContextInspectingOrchestrator(FakeOrchestrator):
+        def __init__(self):
+            super().__init__()
+            self.sessions = SessionMemory()
+            self.context_before_handle = None
+
+        def handle(self, *, question, session_id):
+            state = self.sessions.get(session_id)
+            self.context_before_handle = (
+                state.last_intent,
+                state.last_product_ids,
+                state.last_store_ids,
+                state.last_basis,
+            )
+            return super().handle(question=question, session_id=session_id)
+
+    orchestrator = ContextInspectingOrchestrator()
+    client = TestClient(
+        create_app(lambda: orchestrator, conversation_store=store)
+    )
+
+    response = client.post(
+        "/chat",
+        json={
+            "question": "What about another month?",
+            "session_id": "resume-context",
+            "conversation_id": "resume-context",
+        },
+    )
+
+    assert response.status_code == 200
+    restored_intent, product_ids, store_ids, basis = orchestrator.context_before_handle
+    assert restored_intent["capability"] == "sales_trend"
+    assert restored_intent["metrics"] == ["sales_revenue"]
+    assert restored_intent["filters"]["brands"] == ["Example"]
+    assert restored_intent["time"]["month"] == 9
+    assert product_ids == [4, 5]
+    assert store_ids == [12]
+    assert basis == "Simulated"
 
 
 def test_chat_returns_narration_metadata():

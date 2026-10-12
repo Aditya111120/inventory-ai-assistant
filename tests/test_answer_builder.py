@@ -4,6 +4,7 @@ from app.answer_builder import (
     _build_ranking_answer,
     build_answer,
     build_subject_comparison_answer,
+    concise_leadership_answer,
 )
 from app.calc.metrics import Rules
 from app.llm.schema import Filters, Intent, Sort, TimeWindow
@@ -335,9 +336,10 @@ def test_store_ranking_names_group_winner_and_requested_top_three():
         {"store_name": "Store South", "revenue": 1000},
     ])
     answer = build_answer(question="Which three stores generated highest sales revenue?", intent=intent, df=frame)
-    assert "The 3 highest store results" in answer
-    assert "Store North: INR 3,000.00" in answer
-    assert "Store South: INR 1,000.00" in answer
+    assert "highest store by sales revenue is Store North" in answer
+    assert "INR 3,000.00" in answer
+    assert "3 returned results" in answer
+    assert "Store South" not in answer
     assert "no single product winner" not in answer.casefold()
 
 
@@ -355,8 +357,8 @@ def test_stockout_ranking_names_product_store_and_coverage_in_v1_order():
     answer = _build_ranking_answer(intent, frame)
 
     assert "Product A at Store 1, Delhi (High risk; 3 days of coverage)" in answer
-    assert "Product B at Store 2, Pune (Medium risk; 8 days of coverage)" in answer
-    assert answer.index("Product A") < answer.index("Product B")
+    assert "2 qualifying positions" in answer
+    assert "Product B" not in answer
 
 
 def test_stockout_top_n_narrative_matches_returned_positions_and_total_matches():
@@ -386,11 +388,16 @@ def test_stockout_top_n_narrative_matches_returned_positions_and_total_matches()
         df=frame,
     )
 
-    assert "2 highest-risk product-store positions from 9 qualifying positions across 7 distinct products" in answer
+    assert "highest-risk position is Catalog Product A" in answer
     assert "Catalog Product A at Store East, Pune (High risk; 2 days of coverage; 5-day supplier lead time)" in answer
-    assert "Catalog Product B at Store West, Delhi (Medium risk; 8 days of coverage; 7-day supplier lead time)" in answer
+    assert "2 results are shown in the table" in answer
+    assert "Catalog Product B" not in answer
     assert "may run out before" not in answer
     assert "affecting 7 products across 4 stores" not in answer
+    assert "Business Rules V1" in answer
+    assert "sales observed during" in answer
+    assert "Basis: Actual." in answer
+    assert len(answer.split()) < 60
 
 
 def test_revenue_period_comparison_leads_with_revenue_and_calendar_months():
@@ -444,6 +451,136 @@ def test_group_comparison_reports_deterministic_metric_gap():
     assert "Laptops leads" in answer
     assert "INR 900.00" in answer and "INR 600.00" in answer
     assert "INR 300.00" in answer and "50.0% higher" in answer
+    assert "Actual result" in answer
+    assert len(answer.split()) < 60
+
+
+def test_inventory_value_lookup_explains_sum_of_quantity_times_unit_cost():
+    intent = Intent(
+        capability="inventory_visibility", question_kind="lookup",
+        metrics=["inventory_value"], filters=Filters(),
+    )
+    frame = pd.DataFrame([
+        {"product_id": 1, "store_id": 10, "quantity_on_hand": 2, "cost_price": 100, "inventory_value": 200, "inventory_snapshot_date": "2026-09-30"},
+        {"product_id": 2, "store_id": 10, "quantity_on_hand": 3, "cost_price": 150, "inventory_value": 450, "inventory_snapshot_date": "2026-09-30"},
+    ])
+    frame.attrs["result_counts"] = {
+        "inventory_value_total": 650,
+        "product_store_positions": 2,
+    }
+
+    answer = build_answer(
+        question="What is the inventory value?",
+        intent=intent,
+        df=frame,
+        basis="Actual",
+    )
+
+    assert "INR 650.00" in answer
+    assert "2 product-store positions" in answer
+    assert "Basis: Actual." in answer
+    assert "quantity on hand multiplied by unit cost" not in answer
+    assert len(answer.split()) < 60
+
+
+def test_slow_moving_answer_reports_store_units_and_actual_observation_window():
+    intent = Intent(
+        capability="excess_slow_moving", question_kind="ranking",
+        inventory_classification="slow_moving_candidate",
+        metrics=["sales_units"],
+        filters=Filters(stores=["Chennai Central"]),
+    )
+    frame = pd.DataFrame([{
+        "product_id": 1, "store_id": 10, "product_name": "Phone A",
+        "store_name": "Chennai Central", "city": "Chennai",
+        "units_sold_window": 2, "demand_status": "Slow-moving Candidate",
+    }])
+    frame.attrs.update({
+        "sales_window_start_exclusive": "2026-08-31",
+        "sales_window_end_inclusive": "2026-09-30",
+        "result_counts": {
+            "matching_result_rows": 1, "product_store_positions": 1,
+            "distinct_products": 1,
+        },
+    })
+
+    answer = build_answer(
+        question="Show slow-moving candidates",
+        intent=intent,
+        df=frame,
+        rules=Rules(),
+    )
+
+    assert "1 slow-moving candidates (1–2 recorded sales units)" in answer
+    assert "Phone A at Chennai Central, Chennai recorded 2 sales units" in answer
+    assert "after 2026-08-31 through 2026-09-30" in answer
+    assert "Examples:" not in answer
+    assert len(answer.split()) < 60
+    assert len([part for part in answer.split(". ") if part]) <= 3
+
+
+def test_concise_policy_keeps_result_and_simulation_caveat_without_table_examples():
+    answer = concise_leadership_answer(
+        "Lenovo leads by 12 units in the selected scope. "
+        "Examples: Lenovo A, Lenovo B, and Lenovo C appear in the table. "
+        "This is a simulation, not a forecast."
+    )
+
+    assert answer.startswith("Lenovo leads by 12 units")
+    assert "Examples:" not in answer
+    assert "simulation, not a forecast" in answer
+    assert len(answer.split()) < 60
+    assert answer.count(".") <= 2
+
+
+def test_zero_sales_answer_is_separate_from_slow_moving_candidates():
+    intent = Intent(
+        capability="excess_slow_moving", question_kind="ranking",
+        inventory_classification="no_recorded_sales",
+        metrics=["sales_units"], filters=Filters(),
+    )
+    frame = pd.DataFrame([{
+        "product_id": 1, "store_id": 10, "product_name": "Phone A",
+        "store_name": "Central", "city": "Chennai", "units_sold_window": 0,
+    }])
+    frame.attrs["window_days"] = 30
+    frame.attrs["result_counts"] = {
+        "product_store_positions": 1, "distinct_products": 1,
+    }
+
+    answer = build_answer(
+        question="Show products with no recorded sales",
+        intent=intent,
+        df=frame,
+        rules=Rules(),
+    )
+
+    assert "positions with no recorded sales (0 units)" in answer
+    assert "Slow-moving Candidate" not in answer
+
+
+def test_empty_slow_moving_result_explains_zero_sales_is_separate():
+    intent = Intent(
+        capability="excess_slow_moving", question_kind="ranking",
+        inventory_classification="slow_moving_candidate",
+        metrics=["sales_units"], filters=Filters(),
+    )
+    frame = pd.DataFrame(columns=["product_id", "store_id"])
+    frame.attrs.update({
+        "sales_window_start_exclusive": "2026-08-31",
+        "sales_window_end_inclusive": "2026-09-30",
+        "result_counts": {"product_store_positions": 0, "distinct_products": 0},
+    })
+
+    answer = build_answer(
+        question="Show slow-moving candidates",
+        intent=intent,
+        df=frame,
+        rules=Rules(),
+    )
+
+    assert "No product-store positions met the 1–2 recorded sales-unit" in answer
+    assert "Zero-sales positions are classified separately" in answer
 
 
 def test_historical_analysis_explains_both_snapshot_dates():
@@ -508,12 +645,13 @@ def test_stockout_answer_uses_position_counts_location_and_rule_values():
     )
 
     assert "1 High-risk position and 1 Medium-risk position qualify" in answer
-    assert "covering 1 product across 2 stores" in answer
+    assert "among 1 product across 2 stores" in answer
     assert "Chennai Central, Chennai" in answer
     assert "12 units on hand" in answer
     assert "6 days of coverage" in answer
     assert "10 days of supplier lead time" in answer
-    assert "coverage (6 days) is below supplier lead time (10 days)" in answer
+    assert "Business Rules V1 uses coverage against supplier lead time" in answer
+    assert "sales observed during the approved 30-day sales window" in answer
     assert "may run out before" not in answer
 
 

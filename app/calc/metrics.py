@@ -174,7 +174,7 @@ def is_excess(doi: Optional[float], quantity: float, rules: Rules) -> bool:
 
 
 def is_slow_moving(units_in_window: float, rules: Rules) -> bool:
-    return units_in_window < rules.slow_moving_units_window
+    return 0 < units_in_window < rules.slow_moving_units_window
 
 
 def pct_change(current: float, previous: float) -> Optional[float]:
@@ -335,7 +335,7 @@ def enrich_inventory(
     # Backward-compatible legacy flag; V1 exposes the two independent flags
     # above so no-recorded-sales is not silently presented as confirmed excess.
     out["is_excess"] = (qty > 0) & doi.notna() & (doi > rules.excess_days_of_inventory)
-    out["is_slow_moving"] = units.between(0, 2, inclusive="both")
+    out["is_slow_moving"] = units.between(1, 2, inclusive="both")
     scenario = bool(demand_change_pct or lead_time_extra_days or lead_time_pct)
     out["basis"] = SIMULATED if scenario else ACTUAL
     return out

@@ -13,14 +13,17 @@ import {
   Moon,
   Send,
   Sun,
-  Sparkles,
   Database,
-  Calculator,
-  ShieldCheck,
-  BarChart3,
   PackageSearch,
   MoreHorizontal,
   LogOut,
+  UserRound,
+  CircleHelp,
+  BookOpen,
+  X,
+  Search,
+  MapPin,
+  Tag,
 } from "lucide-react";
 import "./styles.css";
 
@@ -85,6 +88,421 @@ function formatRecentDate(value) {
     hour: "numeric",
     minute: "2-digit",
   }).format(date);
+}
+
+const LEADERSHIP_FAQS = [
+  {
+    title: "Inventory",
+    questions: [
+      "Show inventory by category.",
+      "Which products are slow-moving?",
+      "Which categories have the highest inventory value?",
+    ],
+  },
+  {
+    title: "Sales",
+    questions: [
+      "Show sales revenue trends by month.",
+      "Compare sales by category for last month.",
+      "Which brands have the highest sales revenue?",
+    ],
+  },
+  {
+    title: "Stockout risk",
+    questions: [
+      "Which products have high or medium stockout risk?",
+      "Show stockout risk by store.",
+      "Which products have coverage below supplier lead time?",
+    ],
+  },
+  {
+    title: "What-if analysis",
+    questions: [
+      "What if demand increases by 10% for a product?",
+      "What if supplier lead time increases by 5 days?",
+      "What if sales increase by 10% for a selected brand?",
+    ],
+  },
+];
+
+function ProfileMenu({ user, logoutLoading, logoutError, onLogout }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef(null);
+  const triggerRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutsideClick = (event) => {
+      if (!menuRef.current?.contains(event.target)) setOpen(false);
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className="profile-control" ref={menuRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="header-icon-button"
+        aria-label="Open profile"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls="profile-menu"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <UserRound size={18} aria-hidden="true" />
+      </button>
+      {open && (
+        <section className="profile-menu" id="profile-menu" role="dialog" aria-label="Profile">
+          <div className="profile-menu-heading">
+            <strong>{user.display_name || "Account"}</strong>
+            <button type="button" className="icon-button-small" aria-label="Close profile" onClick={() => setOpen(false)}>
+              <X size={15} />
+            </button>
+          </div>
+          <div className="profile-detail"><span>Account</span><strong>{user.account_id || user.username || "Not provided"}</strong></div>
+          <div className="profile-detail"><span>Role</span><strong>{roleLabel(user.role || user.persona)}</strong></div>
+          {user.full_access === true && (
+            <div className="profile-detail"><span>Access</span><strong>Full Authorized Access</strong></div>
+          )}
+          {logoutError && <div className="logout-error" role="alert">{logoutError}</div>}
+          <button type="button" className="profile-logout" onClick={onLogout} disabled={logoutLoading}>
+            <LogOut size={15} />
+            {logoutLoading ? "Logging out…" : "Log out"}
+          </button>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function HelpPanel({ view, onClose, onSelectQuestion, onAskQuestion }) {
+  if (!view) return null;
+  return (
+    <section className="help-panel" aria-labelledby="help-panel-title">
+      <div className="help-panel-header">
+        <div>
+          <h2 id="help-panel-title">{view === "faqs" ? "Frequently asked questions" : "How to ask"}</h2>
+        </div>
+        <button type="button" className="icon-button-small" onClick={onClose} aria-label="Close help panel">
+          <X size={17} />
+        </button>
+      </div>
+      {view === "faqs" ? (
+        <div className="faq-groups">
+          {LEADERSHIP_FAQS.map((group) => (
+            <section className="faq-group" key={group.title} aria-labelledby={`faq-${group.title.replaceAll(" ", "-")}`}>
+              <h3 id={`faq-${group.title.replaceAll(" ", "-")}`}>{group.title}</h3>
+              <div className="faq-questions">
+                {group.questions.map((item) => (
+                  <div className="faq-question" key={item}>
+                    <button type="button" className="faq-question-text" onClick={() => onSelectQuestion(item)}>
+                      {item}
+                    </button>
+                    <button type="button" className="faq-send" onClick={() => onAskQuestion(item)} aria-label={`Ask: ${item}`}>
+                      <Send size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      ) : (
+        <div className="ask-guide">
+          <p>Ask for one measurable result, and include the metric, entity, location, or period when you know it.</p>
+          <div className="ask-example unclear">
+            <strong>Unclear</strong>
+            <span>“How are we doing?”</span>
+          </div>
+          <div className="ask-example clearer">
+            <strong>More specific</strong>
+            <span>“Compare sales revenue by category for September 2026.”</span>
+          </div>
+          <div className="ask-example unclear">
+            <strong>Unclear</strong>
+            <span>“Show me the risks.”</span>
+          </div>
+          <div className="ask-example clearer">
+            <strong>More specific</strong>
+            <span>“Which products have high or medium stockout risk in Mumbai?”</span>
+          </div>
+          <p className="help-note">If a store-level question needs a location, the assistant can ask you to choose an authorized city and store. You can then use contextual follow-ups such as “What about another brand?” or “Now show last month.”</p>
+        </div>
+      )}
+    </section>
+  );
+}
+
+async function getExploreData(path, signal) {
+  const response = await fetch(`${API_URL}${path}`, {
+    credentials: "include",
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(response.status === 401
+      ? "Your session has expired. Please sign in again."
+      : "Explore Data could not be loaded. Please try again.");
+  }
+  return response.json();
+}
+
+function exploreQuestion(selection) {
+  if (selection.kind === "product") return `Show inventory for ${selection.name}.`;
+  if (selection.kind === "brand") return `Show inventory for ${selection.name}.`;
+  if (selection.kind === "category") return `Show inventory for ${selection.name} category.`;
+  if (selection.kind === "subcategory") return `Show inventory for ${selection.name} subcategory.`;
+  if (selection.kind === "city") return `Show inventory in ${selection.name}.`;
+  if (selection.kind === "region") return `Show inventory in ${selection.name} region.`;
+  if (selection.kind === "store") return `Show inventory at ${selection.name}.`;
+  if (selection.kind === "sales-period") return `Show sales from ${selection.start} to ${selection.end}.`;
+  if (selection.kind === "inventory-date") return `Show inventory as of ${selection.date}.`;
+  return `Show inventory snapshot for ${selection.date}.`;
+}
+
+function ExploreDataView({ onClose, onAskAbout }) {
+  const [section, setSection] = useState("products");
+  const [catalogFilters, setCatalogFilters] = useState({ brands: [], categories: [], subcategories: [] });
+  const [locations, setLocations] = useState([]);
+  const [availability, setAvailability] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [initialError, setInitialError] = useState("");
+  const [search, setSearch] = useState("");
+  const [brand, setBrand] = useState("");
+  const [category, setCategory] = useState("");
+  const [subcategory, setSubcategory] = useState("");
+  const [page, setPage] = useState(1);
+  const [products, setProducts] = useState({ items: [], total: 0, pages: 0, page: 1, page_size: 25 });
+  const [productsLoading, setProductsLoading] = useState(true);
+  const [productsError, setProductsError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    Promise.all([
+      getExploreData("/explore/filters", controller.signal),
+      getExploreData("/explore/locations", controller.signal),
+      getExploreData("/explore/availability", controller.signal),
+    ])
+      .then(([availableFilters, availableLocations, dataAvailability]) => {
+        setCatalogFilters(availableFilters);
+        setLocations(availableLocations.items || []);
+        setAvailability(dataAvailability);
+      })
+      .catch((error) => {
+        if (error.name !== "AbortError") setInitialError(error.message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setInitialLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const params = new URLSearchParams({ page: String(page), page_size: "25" });
+    if (search.trim()) params.set("search", search.trim());
+    if (brand) params.set("brand", brand);
+    if (category) params.set("category", category);
+    if (subcategory) params.set("subcategory", subcategory);
+    getExploreData(`/explore/products?${params}`, controller.signal)
+      .then((result) => {
+        setProductsError("");
+        setProducts(result);
+      })
+      .catch((error) => {
+        if (error.name !== "AbortError") setProductsError(error.message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setProductsLoading(false);
+      });
+    return () => controller.abort();
+  }, [search, brand, category, subcategory, page]);
+
+  const cities = [...new Set(locations.map((item) => item.city).filter(Boolean))].sort();
+  const regions = [...new Set(locations.map((item) => item.region).filter(Boolean))].sort();
+  const sections = [
+    ["products", "Products"],
+    ["brands", "Brands & Categories"],
+    ["locations", "Locations"],
+    ["availability", "Data Availability"],
+  ];
+
+  return (
+    <section className="explore-data" aria-labelledby="explore-data-title">
+      <div className="explore-header">
+        <div>
+          <div className="welcome-label">Browse authorized catalog and data coverage</div>
+          <h2 id="explore-data-title">Explore Data</h2>
+        </div>
+        <button type="button" className="icon-button-small" onClick={onClose} aria-label="Close Explore Data">
+          <X size={17} />
+        </button>
+      </div>
+      <div className="explore-tabs" role="tablist" aria-label="Explore data sections">
+        {sections.map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={section === key}
+            className={section === key ? "active" : ""}
+            onClick={() => setSection(key)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {selected && (
+        <div className="explore-selection">
+          <span>Selected: <strong>{selected.name || selected.label}</strong></span>
+          <button type="button" onClick={() => onAskAbout(exploreQuestion(selected))}>Ask about this</button>
+          <button type="button" className="explore-clear-selection" onClick={() => setSelected(null)}>Clear</button>
+        </div>
+      )}
+
+      {initialError && <p className="explore-error" role="alert">{initialError}</p>}
+      {section === "products" && (
+        <div className="explore-section" role="tabpanel">
+          <div className="explore-product-filters">
+            <label className="explore-search">
+              <Search size={15} aria-hidden="true" />
+              <input aria-label="Search products" value={search} onChange={(event) => { setProductsLoading(true); setProductsError(""); setSearch(event.target.value); setPage(1); }} placeholder="Search SKU, product or brand" />
+            </label>
+            <select aria-label="Filter by brand" value={brand} onChange={(event) => { setProductsLoading(true); setProductsError(""); setBrand(event.target.value); setPage(1); }}>
+              <option value="">All brands</option>
+              {catalogFilters.brands.map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+            <select aria-label="Filter by category" value={category} onChange={(event) => { setProductsLoading(true); setProductsError(""); setCategory(event.target.value); setPage(1); }}>
+              <option value="">All categories</option>
+              {catalogFilters.categories.map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+            <select aria-label="Filter by subcategory" value={subcategory} onChange={(event) => { setProductsLoading(true); setProductsError(""); setSubcategory(event.target.value); setPage(1); }}>
+              <option value="">All subcategories</option>
+              {catalogFilters.subcategories.map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+          </div>
+          {productsError && <p className="explore-error" role="alert">{productsError}</p>}
+          <div className="explore-table-wrap">
+            <table className="explore-table">
+              <thead><tr><th>SKU</th><th>Product</th><th>Brand</th><th>Category</th><th>Subcategory</th><th>Status</th></tr></thead>
+              <tbody>
+                {products.items.map((item) => (
+                  <tr key={item.product_id}>
+                    <td>{item.sku || "—"}</td>
+                    <td><button type="button" className="explore-entity-link" onClick={() => setSelected({ kind: "product", name: item.product_name })}>{item.product_name || "Unnamed product"}</button></td>
+                    <td>{item.brand || "—"}</td>
+                    <td>{item.category || "—"}</td>
+                    <td>{item.subcategory || "—"}</td>
+                    <td>{item.is_active ? "Active" : "Inactive"}</td>
+                  </tr>
+                ))}
+                {!productsLoading && !products.items.length && <tr><td colSpan="6" className="explore-empty">No catalog products match these filters.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <div className="explore-pagination">
+            <span>{productsLoading ? "Loading products…" : `${products.total.toLocaleString()} catalog products`}</span>
+            <div>
+              <button type="button" onClick={() => { setProductsLoading(true); setProductsError(""); setPage((current) => Math.max(1, current - 1)); }} disabled={page <= 1 || productsLoading}>Previous</button>
+              <span>Page {page} of {Math.max(products.pages, 1)}</span>
+              <button type="button" onClick={() => { setProductsLoading(true); setProductsError(""); setPage((current) => current + 1); }} disabled={page >= products.pages || productsLoading}>Next</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {section === "brands" && (
+        <div className="explore-section explore-entity-groups" role="tabpanel">
+          {[
+            ["Brands", "brand", catalogFilters.brands],
+            ["Categories", "category", catalogFilters.categories],
+            ["Subcategories", "subcategory", catalogFilters.subcategories],
+          ].map(([title, kind, values]) => (
+            <section key={title} className="explore-entity-group">
+              <h3><Tag size={15} />{title}</h3>
+              {values.length ? (
+                <div className="explore-chips">{values.map((value) => (
+                  <button key={value} type="button" className={selected?.name === value ? "selected" : ""} onClick={() => setSelected({ kind, name: value })}>{value}</button>
+                ))}</div>
+              ) : <p className="explore-muted">No authorized {title.toLowerCase()} are available.</p>}
+            </section>
+          ))}
+          {initialLoading && <p className="explore-muted">Loading catalog filters…</p>}
+        </div>
+      )}
+      {section === "locations" && (
+        <div className="explore-section explore-locations" role="tabpanel">
+          <section className="explore-entity-group">
+            <h3><MapPin size={15} />Cities</h3>
+            <div className="explore-chips">{cities.map((value) => <button key={value} type="button" onClick={() => setSelected({ kind: "city", name: value })}>{value}</button>)}</div>
+          </section>
+          <section className="explore-entity-group">
+            <h3><MapPin size={15} />Regions</h3>
+            <div className="explore-chips">{regions.map((value) => <button key={value} type="button" onClick={() => setSelected({ kind: "region", name: value })}>{value}</button>)}</div>
+          </section>
+          <section className="explore-entity-group">
+            <h3>Authorized stores</h3>
+            <div className="explore-table-wrap">
+              <table className="explore-table">
+                <thead><tr><th>Store</th><th>City</th><th>Region</th></tr></thead>
+                <tbody>{locations.map((item) => (
+                  <tr key={item.store_id}>
+                    <td><button type="button" className="explore-entity-link" onClick={() => setSelected({ kind: "store", name: item.store_name })}>{item.store_name}</button></td>
+                    <td>{item.city || "—"}</td><td>{item.region || "—"}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+            {!locations.length && !initialLoading && <p className="explore-muted">No authorized locations are available.</p>}
+            {initialLoading && <p className="explore-muted">Loading authorized locations…</p>}
+          </section>
+        </div>
+      )}
+      {section === "availability" && (
+        <div className="explore-section" role="tabpanel">
+          {initialLoading && <p className="explore-muted">Loading data availability…</p>}
+          {availability && (
+            <>
+              <div className="explore-counts">
+                <div><span>Catalog products</span><strong>{availability.catalog_products.toLocaleString()}</strong><small>Products in the authorized catalog</small></div>
+                <div><span>Products with inventory records</span><strong>{availability.inventory_products.toLocaleString()}</strong><small>Catalog products represented in inventory</small></div>
+                <div><span>Products with positive stock</span><strong>{availability.positive_stock_products.toLocaleString()}</strong><small>Inventory records with quantity above zero</small></div>
+              </div>
+              <div className="explore-coverage">
+                {[
+                  ["Inventory", "inventory", "inventory-date"],
+                  ["Sales", "sales", "sales-period"],
+                  ["Weekly snapshots", "snapshots", "snapshot-date"],
+                ].map(([label, key, kind]) => {
+                  const period = availability.coverage[key];
+                  const lastDate = period?.last_date;
+                  return (
+                    <div key={key} className="explore-coverage-item">
+                      <div><strong>{label}</strong><span>{period?.first_date && lastDate ? `${period.first_date} — ${lastDate}` : "No reporting dates available"}</span></div>
+                      {lastDate && <button type="button" onClick={() => setSelected(kind === "sales-period"
+                        ? { kind, name: `${label} date coverage`, start: period.first_date || lastDate, end: lastDate }
+                        : { kind, name: `${label} reporting date`, date: lastDate })}>Select date coverage</button>}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function formatNumber(value) {
@@ -328,203 +746,8 @@ function ResultTable({ rows, intent = null, display = null }) {
   );
 }
 
-function TrustPanel({ payload }) {
-  const [open, setOpen] = useState(false);
-  const trust = payload?.trust_panel || {};
-  const evidenceAvailable = Boolean(
-    trust.interpretation && trust.query
-  );
-
-  return (
-    <div className="trust-panel">
-      <button
-        className="trust-toggle"
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span className="trust-toggle-left">
-          <ShieldCheck size={16} />
-          How this answer was produced
-        </span>
-        {open ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
-      </button>
-
-      {open && (
-        <div className="trust-content">
-          {!evidenceAvailable && (
-            <div className="trust-block" role="status">
-              Detailed evidence was not saved with this response.
-            </div>
-          )}
-          <section>
-            <div className="trust-heading">
-              <Sparkles size={15} />
-              Interpretation
-            </div>
-
-            <div className="trust-grid">
-              <div>
-                <span>Capability</span>
-                <strong>
-                  {trust.interpretation?.capability || "Not saved"}
-                </strong>
-              </div>
-
-              <div>
-                <span>Group by</span>
-                <strong>
-                  {trust.interpretation?.group_by || "Not saved"}
-                </strong>
-              </div>
-
-              <div>
-                <span>Metrics</span>
-                <strong>
-                  {trust.interpretation?.metrics?.join(", ") || "Not saved"}
-                </strong>
-              </div>
-
-              <div>
-                <span>Previous result</span>
-                <strong>
-                  {trust.interpretation?.uses_previous_result
-                    ? "Yes"
-                    : "No"}
-                </strong>
-              </div>
-            </div>
-
-            {!!trust.interpretation?.resolved_entities?.length && (
-              <div className="trust-block">
-                <span>Resolved entities</span>
-                {trust.interpretation.resolved_entities.map(
-                  (item, index) => (
-                    <div key={index} className="trust-line">
-                      {item}
-                    </div>
-                  )
-                )}
-              </div>
-            )}
-          </section>
-
-          <section>
-            <div className="trust-heading">
-              <Database size={15} />
-              Query evidence
-            </div>
-
-            <div className="trust-meta">
-              <span>Matching result rows</span>
-              <strong>
-                {trust.query?.row_count ?? "Not saved"}
-              </strong>
-            </div>
-            {trust.query?.returned_result_rows != null && (
-              <div className="trust-meta">
-                <span>Returned top-risk positions</span>
-                <strong>{trust.query.returned_result_rows}</strong>
-              </div>
-            )}
-            {trust.interpretation?.capability === "stockout_risk"
-              && trust.query?.result_counts?.distinct_products != null && (
-                <div className="trust-meta">
-                  <span>Distinct products in qualifying set</span>
-                  <strong>{trust.query.result_counts.distinct_products}</strong>
-                </div>
-              )}
-            {!!trust.query?.result_counts?.product_store_positions && (
-              <div className="trust-meta">
-                <span>Product-store positions</span>
-                <strong>{trust.query.result_counts.product_store_positions}</strong>
-              </div>
-            )}
-
-            {!!trust.query?.sql?.length &&
-              trust.query.sql.map((sql, index) => (
-                <pre key={index} className="code-block">
-                  {sql}
-                </pre>
-              ))}
-
-            {!!trust.query?.params?.length && (
-              <div className="trust-block">
-                <span>Parameters</span>
-
-                {trust.query.params.map((item, index) => (
-                  <pre key={index} className="code-block compact">
-                    {JSON.stringify(item)}
-                  </pre>
-                ))}
-              </div>
-            )}
-          </section>
-
-          {!!trust.calculations?.length && (
-            <section>
-              <div className="trust-heading">
-                <Calculator size={15} />
-                Calculations
-              </div>
-
-              {trust.calculations.map((calc, index) => (
-                <div className="calc-card" key={index}>
-                  <strong>{calc.metric}</strong>
-
-                  {calc.formula && (
-                    <pre className="code-block compact">
-                      {calc.formula}
-                    </pre>
-                  )}
-
-                  {calc.values && (
-                    <pre className="code-block compact">
-                      {JSON.stringify(calc.values, null, 2)}
-                    </pre>
-                  )}
-
-                  <div className="calc-result">
-                    Result: {formatNumber(calc.result)}
-                  </div>
-
-                  <div className="calc-basis">
-                    {calc.basis || trust.basis || payload.basis}
-                  </div>
-                </div>
-              ))}
-            </section>
-          )}
-
-          {!!Object.keys(trust.rules_applied || {}).length && (
-            <section>
-              <div className="trust-heading">
-                <BarChart3 size={15} />
-                Business rules
-              </div>
-
-              <div className="rules-grid">
-                {Object.entries(trust.rules_applied).map(
-                  ([key, value]) => (
-                    <div key={key} className="rule-item">
-                      <span>{key.replaceAll("_", " ")}</span>
-                      <strong>{formatNumber(value)}</strong>
-                    </div>
-                  )
-                )}
-              </div>
-            </section>
-          )}
-
-          <div className="trust-footer">
-            <span>Source basis</span>
-            <strong>{trust.basis || payload.basis}</strong>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function AssistantMessage({ payload, onFollowup }) {
+  const [supportingDataOpen, setSupportingDataOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   if (!payload) return null;
 
@@ -600,7 +823,21 @@ function AssistantMessage({ payload, onFollowup }) {
   const summaryOnly = response.summary_only === true || payload.display?.summary_only === true;
   const display = { columns: response.display_columns || payload.display?.columns };
   const presentation = payload.display || {};
-  const supportingOnly = presentation.single_result_supporting_only === true;
+  const trust = payload.trust_panel || {};
+  const queryEvidence = trust.query && (
+    trust.query.row_count != null
+    || trust.query.returned_result_rows != null
+    || Boolean(trust.query.result_counts)
+    || Boolean(trust.query.sql?.length)
+    || Boolean(trust.query.params?.length)
+  );
+  const answerFacts = payload.answer_facts || response.answer_facts;
+  const hasAnalyticalEvidence = Boolean(
+    rows.length
+    || payload.intent?.capability
+    || queryEvidence
+    || Object.keys(answerFacts || {}).length
+  );
 
   return (
     <div className="message-row assistant-row">
@@ -613,21 +850,42 @@ function AssistantMessage({ payload, onFollowup }) {
           {payload.narrative || "The request completed successfully."}
         </div>
 
-        <div className={`basis-pill ${simulated ? "simulated" : "actual"}`}>
-          {simulated ? "Simulated" : "Actual"}
+        <div className="response-evidence-row">
+          <div className={`basis-pill ${simulated ? "simulated" : "actual"}`}>
+            {simulated ? "Simulated" : "Actual"}
+          </div>
+          {hasAnalyticalEvidence && (
+            <button
+              type="button"
+              className="supporting-data-button"
+              aria-expanded={supportingDataOpen}
+              onClick={() => setSupportingDataOpen((value) => !value)}
+            >
+              <Database size={14} aria-hidden="true" />
+              Supporting Data
+              {supportingDataOpen
+                ? <ChevronDown size={14} aria-hidden="true" />
+                : <ChevronRight size={14} aria-hidden="true" />}
+            </button>
+          )}
         </div>
 
         {presentation.shared_snapshot_date && (
           <div className="snapshot-label">Stock recorded on {presentation.shared_snapshot_date}</div>
         )}
 
-        {!!rows.length && !summaryOnly && (!supportingOnly || expanded) && (
+        {supportingDataOpen && (
           <div className="result-section">
             <div className="section-label">
-              Results
+              Supporting Data
             </div>
 
-            {(() => {
+            {!rows.length || summaryOnly ? (
+              <p className="supporting-data-empty" role="status">
+                No supporting records available
+              </p>
+            ) : (
+              (() => {
               const hasMore = response.has_more === true;
 
               return (
@@ -645,17 +903,10 @@ function AssistantMessage({ payload, onFollowup }) {
                   )}
                 </>
               );
-            })()}
+              })()
+            )}
           </div>
         )}
-
-        {supportingOnly && !!rows.length && (
-          <button type="button" className="results-toggle" onClick={() => setExpanded((value) => !value)}>
-            {expanded ? "Hide supporting record" : "Show supporting record"}
-          </button>
-        )}
-
-        <TrustPanel payload={payload} />
 
         {suggestedQuestions(payload).length > 0 && (
           <div className="suggestion-section">
@@ -684,6 +935,7 @@ function AssistantMessage({ payload, onFollowup }) {
 
 function App() {
   const [theme, setTheme] = useState("light");
+  const [helpView, setHelpView] = useState(null);
   const [sessionId, setSessionId] = useState(newSessionId);
   const [messages, setMessages] = useState([]);
   const [question, setQuestion] = useState("");
@@ -696,6 +948,7 @@ function App() {
   const [logoutLoading, setLogoutLoading] = useState(false);
   const [logoutError, setLogoutError] = useState("");
   const accountEpochRef = useRef(0);
+  const questionInputRef = useRef(null);
   const [recents, setRecents] = useState([]);
   const [activeConversation, setActiveConversation] = useState(null);
   const userId = user?.user_id;
@@ -902,6 +1155,24 @@ function App() {
     setSessionId(nextConversation);
     setActiveConversation(nextConversation);
     setQuestion("");
+    setHelpView(null);
+  }
+
+  function selectFAQQuestion(example) {
+    setQuestion(example);
+    setHelpView(null);
+    window.requestAnimationFrame(() => questionInputRef.current?.focus());
+  }
+
+  function selectExploreQuestion(example) {
+    setQuestion(example);
+    setHelpView(null);
+    window.requestAnimationFrame(() => questionInputRef.current?.focus());
+  }
+
+  function askFAQQuestion(example) {
+    setHelpView(null);
+    window.requestAnimationFrame(() => sendQuestion(example));
   }
 
   async function openConversation(conversationId) {
@@ -968,15 +1239,6 @@ function App() {
           />
         </div>
 
-        <div className="persona-control sidebar-profile" aria-label="Account details">
-          <span className="account-display-name">{user.display_name}</span>
-          <small>Account: {user.account_id || user.username}</small>
-          <small>Role: {roleLabel(user.role || user.persona)}</small>
-          {user.role === "STORE_MANAGER" && <small>Region: {(user.regions || []).join(", ") || "Not assigned"}</small>}
-          {user.role === "BRAND_MANAGER" && <small>Brands: {(user.brands || []).join(", ") || "Not assigned"}</small>}
-          {(user.role === "PLANNER" || user.role === "LEADERSHIP") && <small>Full access</small>}
-        </div>
-
         <button
           className="new-chat-button"
           onClick={resetChat}
@@ -1006,64 +1268,74 @@ function App() {
           </div>
         </>}
 
-        <div className="sidebar-section-title">
-          What I can help with
-        </div>
-
-        <div className="capability-list">
-          <div>Inventory visibility</div>
-          <div>Inventory health</div>
-          <div>Stockout risk</div>
-          <div>Sales trends</div>
-          <div>Excess & slow-moving</div>
-          <div>What-if analysis</div>
-        </div>
-
-        <div className="sidebar-bottom">
-          <div className="sidebar-status">
-            <span className="status-dot" />
-            Inventory data connected
-          </div>
-          {logoutError && <div className="logout-error" role="alert">{logoutError}</div>}
-          <button className="logout-button" type="button" onClick={handleLogout} disabled={logoutLoading}>
-            <LogOut size={15} />
-            {logoutLoading ? "Logging out…" : "Log out"}
+        <div className="sidebar-help-nav" aria-label="Help">
+          <button
+            type="button"
+            className={`sidebar-help-button ${helpView === "explore-data" ? "active" : ""}`}
+            aria-pressed={helpView === "explore-data"}
+            onClick={() => setHelpView((current) => current === "explore-data" ? null : "explore-data")}
+          >
+            <Database size={16} />
+            Explore Data
+          </button>
+          <button
+            type="button"
+            className={`sidebar-help-button ${helpView === "faqs" ? "active" : ""}`}
+            aria-pressed={helpView === "faqs"}
+            onClick={() => setHelpView((current) => current === "faqs" ? null : "faqs")}
+          >
+            <CircleHelp size={16} />
+            FAQs
+          </button>
+          <button
+            type="button"
+            className={`sidebar-help-button ${helpView === "how-to-ask" ? "active" : ""}`}
+            aria-pressed={helpView === "how-to-ask"}
+            onClick={() => setHelpView((current) => current === "how-to-ask" ? null : "how-to-ask")}
+          >
+            <BookOpen size={16} />
+            How to Ask
           </button>
         </div>
+
       </aside>
 
       <main className="main">
 
         <header className="header">
           <div>
-            <h1>Inventory AI Leadership Assistant</h1>
+            <h1>Inventory AI Assistant</h1>
             <p>Inventory, Sales &amp; Operational Intelligence</p>
           </div>
 
-          <div className="theme-control">
+          <div className="header-actions">
             <button
-              className={theme === "light" ? "active" : ""}
-              onClick={() => setTheme("light")}
-              aria-label="Light theme"
+              type="button"
+              className="header-icon-button"
+              onClick={() => setTheme((current) => current === "light" ? "dark" : "light")}
+              aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`}
+              aria-pressed={theme === "dark"}
+              title={`Switch to ${theme === "light" ? "dark" : "light"} theme`}
             >
-              <Sun size={15} />
-              Light
+              {theme === "light" ? <Moon size={18} aria-hidden="true" /> : <Sun size={18} aria-hidden="true" />}
             </button>
-
-            <button
-              className={theme === "dark" ? "active" : ""}
-              onClick={() => setTheme("dark")}
-              aria-label="Dark theme"
-            >
-              <Moon size={15} />
-              Dark
-            </button>
+            <ProfileMenu user={user} logoutLoading={logoutLoading} logoutError={logoutError} onLogout={handleLogout} />
           </div>
         </header>
 
         <div className="accent-line" />
 
-        {!hasConversation && (
+        <HelpPanel
+          view={helpView === "faqs" || helpView === "how-to-ask" ? helpView : null}
+          onClose={() => setHelpView(null)}
+          onSelectQuestion={selectFAQQuestion}
+          onAskQuestion={askFAQQuestion}
+        />
+        {helpView === "explore-data" && (
+          <ExploreDataView onClose={() => setHelpView(null)} onAskAbout={selectExploreQuestion} />
+        )}
+
+        {!hasConversation && !helpView && (
           <section className="landing">
 
             <div className="welcome">
@@ -1072,11 +1344,11 @@ function App() {
               </div>
 
               <h2>
-                Inventory Intelligence for Better Decisions
+                What would you like to explore today?
               </h2>
 
               <p>
-                Explore inventory performance, sales trends, stock availability, and operational risks through data-backed insights.
+                Ask questions about inventory, sales, product performance, and operational risks. Get clear, data-backed answers to support better decisions.
               </p>
             </div>
 
@@ -1099,7 +1371,7 @@ function App() {
           </section>
         )}
 
-        {hasConversation && (
+        {hasConversation && !helpView && (
           <section className="conversation">
             {messages.map((message, index) => {
               if (message.role === "user") {
@@ -1144,7 +1416,7 @@ function App() {
           </section>
         )}
 
-        <div className="composer-area">
+        {!helpView && <div className="composer-area">
 
           <form
             className="composer"
@@ -1154,6 +1426,7 @@ function App() {
             }}
           >
             <input
+              ref={questionInputRef}
               type="text"
               value={question}
               onChange={(event) =>
@@ -1176,6 +1449,7 @@ function App() {
             Analysis and decision support only · No inventory changes are made
           </div>
         </div>
+        }
 
         <footer>
           C5i · Human · AI · Impact

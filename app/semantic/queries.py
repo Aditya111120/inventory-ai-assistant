@@ -63,16 +63,19 @@ def _ids(values) -> list[int]:
 
 
 def restrict(
-    resolved: Optional[Sequence[int]], previous: Optional[Sequence[int]]
+    resolved: Optional[Sequence[int]],
+    previous: Optional[Sequence[int]],
 ) -> Optional[list[int]]:
-    """Follow-up rule: intersect previous result with newly stated filters.
-    None = no restriction. Empty list = nothing matches.
-    """
-    if resolved is None or len(resolved) == 0:
+    """Preserve empty scopes and intersect explicit restrictions."""
+    if resolved is None:
         return None if previous is None else _ids(previous)
+
     if previous is None:
         return _ids(resolved)
-    return sorted(set(_ids(resolved)) & set(_ids(previous)))
+
+    return sorted(
+        set(_ids(resolved)) & set(_ids(previous))
+    )
 
 
 def _in_clause(col: str, ids: Optional[list[int]]):
@@ -306,7 +309,12 @@ class Queries:
         WHERE 1 = 1 {pc} {sc}"""
         params = [start.isoformat(), end.isoformat()] + pp + sp_
         res.df = self._q(res, sql, params)
-        res.df.attrs["window_days"] = (end - start).days
+        res.df.attrs.update({
+            "window_days": (end - start).days,
+            "sales_window_start_exclusive": start.isoformat(),
+            "sales_window_end_inclusive": end.isoformat(),
+            "sales_window_label": label,
+        })
         return res
 
     def inventory_snapshot(
@@ -393,6 +401,12 @@ class Queries:
         capability = getattr(intent, "capability", "")
         if capability in {"stockout_risk", "inventory_health", "what_if"}:
             return df.copy()
+        if (
+            capability == "excess_slow_moving"
+            and getattr(intent, "inventory_classification", None)
+            in {"slow_moving_candidate", "no_recorded_sales"}
+        ):
+            return df.copy()
         if capability == "inventory_visibility" and (has_entity_scope or getattr(intent, "threshold", None) is not None):
             return df.copy()
 
@@ -477,14 +491,33 @@ class Queries:
                 df["days_of_inventory"] > rules.excess_days_of_inventory
             )
         if getattr(intent, "capability", "") == "excess_slow_moving":
-            col = (
-                "excess_by_max_level" if excess_rule == "max_level" else "excess_by_doi"
-            )
-            other = (
-                "excess_by_doi" if excess_rule == "max_level" else "excess_by_max_level"
-            )
-            df = df[df[col]]
-            notes.append(f"Excess rule used: {col} (alternative also available: {other})")
+            classification = getattr(intent, "inventory_classification", None)
+            if classification in {"slow_moving_candidate", "no_recorded_sales"}:
+                expected_status = {
+                    "slow_moving_candidate": "Slow-moving Candidate",
+                    "no_recorded_sales": "No Recorded Sales",
+                }[classification]
+                df = df[df["demand_status"].eq(expected_status)]
+                notes.append(f"Inventory classification used: {expected_status}")
+            elif classification == "excess_coverage_candidate":
+                df = df[df["excess_coverage_candidate"]]
+                notes.append(
+                    "Inventory classification used: excess coverage candidate "
+                    f"(DOI > {rules.excess_days_of_inventory:g} days)"
+                )
+            else:
+                col = (
+                    "excess_by_max_level"
+                    if classification == "excess_by_max_level" or excess_rule == "max_level"
+                    else "excess_by_doi"
+                )
+                other = (
+                    "excess_by_doi"
+                    if col == "excess_by_max_level"
+                    else "excess_by_max_level"
+                )
+                df = df[df[col]]
+                notes.append(f"Excess rule used: {col} (alternative also available: {other})")
 
         if getattr(intent, "capability", "") == "inventory_health":
             reasons = pd.Series("", index=df.index, dtype="object")
