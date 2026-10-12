@@ -1,0 +1,51 @@
+# Environment variables and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local conversation databases
+inventory_ai_history.sqlite3
+test-history*.sqlite3
+*.sqlite
+*.sqlite3
+*.db
+
+# React / Node.js
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+
+# Logs and generated reports
+logs/
+*.log
+reports/
+phase1_acceptance_report.json
+phase1_acceptance_report.md
+*_PREFLIGHT_REPORT.json
+*_MIGRATION_REPORT.json
+
+# Local IDE and temporary files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp
+
+# Business data exports - review before committing
+*.bak
+*.bacpac
+*.xlsx
+*.xls

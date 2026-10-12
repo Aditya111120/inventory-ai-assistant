@@ -1,0 +1,16 @@
+# Phase 1 (this drop): config, DB access, calculation layer, tests
+pyodbc>=5.0
+pandas>=2.0
+numpy>=1.26
+python-dotenv>=1.0
+pytest>=8.0
+pydantic>=2.0
+groq>=0.30
+fastapi>=0.100
+uvicorn>=0.20
+streamlit>=1.30
+requests>=2.30
+argon2-cffi>=23.1
+
+# Optional SQL parsing support for future query validation.
+# sqlglot
