@@ -61,6 +61,76 @@ def test_unambiguous_two_month_comparison_preserves_same_shared_year():
     assert (normalized.time.comparison_month, normalized.time.comparison_year) == (5, 2026)
 
 
+def test_explicit_two_inventory_measures_are_preserved_for_scatter_intent():
+    intent = Intent(
+        capability="inventory_visibility",
+        metrics=["inventory_value"],
+        filters=Filters(),
+    )
+    normalized = _normalise(
+        intent,
+        "For each product, compare quantity on hand with inventory value.",
+    )
+
+    assert normalized.capability == "inventory_visibility"
+    assert normalized.question_kind == "comparison"
+    assert normalized.group_by == "product"
+    assert normalized.metrics == ["quantity", "inventory_value"]
+
+
+def test_explicit_demand_scenario_is_normalized_without_llm_capability_guess():
+    intent = Intent(
+        capability="inventory_visibility",
+        metrics=["quantity"],
+        filters=Filters(cities=["Connaught Place"]),
+    )
+    normalized = _normalise(
+        intent,
+        "For products in Connaught Place, compare actual and simulated days of "
+        "inventory if demand increases by 20%.",
+    )
+
+    assert normalized.capability == "what_if"
+    assert normalized.question_kind == "scenario"
+    assert normalized.group_by == "product"
+    assert normalized.metrics == ["days_of_inventory"]
+    assert normalized.scenario.kind == "demand_change_pct"
+    assert normalized.scenario.value == 20
+
+
+def test_snapshot_question_is_normalized_to_historical_capability():
+    intent = Intent(
+        capability="inventory_visibility",
+        metrics=["quantity"],
+        filters=Filters(),
+    )
+    normalized = _normalise(
+        intent,
+        "Show inventory quantity across the latest two available snapshots.",
+    )
+
+    assert normalized.capability == "historical_analysis"
+    assert normalized.question_kind == "comparison"
+    assert normalized.time.kind == "latest"
+
+
+def test_current_month_sales_comparison_sets_previous_period_window():
+    intent = Intent(
+        capability="sales_trend",
+        metrics=["sales_units"],
+        filters=Filters(),
+        group_by="brand",
+    )
+    normalized = _normalise(
+        intent,
+        "Compare sales units by brand for the current month and the previous month.",
+    )
+
+    assert normalized.question_kind == "comparison"
+    assert normalized.time.kind == "this_month"
+    assert normalized.time.compare_to_previous is True
+
+
 @pytest.mark.parametrize("question", [
     "Compare Samsung inventory between June 2026 and July 2026",
     "Compare Samsung inventory between June and July 2026",

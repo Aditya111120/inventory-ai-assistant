@@ -1502,12 +1502,36 @@ function App() {
     return (
       <div className={`app ${theme} login-screen`}>
         <form className="login-card" onSubmit={signIn}>
-          <img className="sidebar-logo" src={theme === "dark" ? "/c5i_logo_dark.png" : "/c5i_logo_light.png"} alt="C5i" />
-          <h1>Sign in to Inventory AI</h1>
-          <label>Username<input value={loginUsername} onChange={(event) => setLoginUsername(event.target.value)} autoComplete="username" /></label>
-          <label>Password<input type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} autoComplete="current-password" /></label>
+          <div className="login-brand">
+            <img className="login-logo" src="/c5i_logo_dark.png" alt="C5i" />
+          </div>
+          <div className="login-intro">
+            <h1>Welcome to Inventory AI Assistant</h1>
+            <p>Sign in to explore inventory, sales, and operational insights.</p>
+          </div>
+          <label className="login-field">
+            <span>Username</span>
+            <input
+              type="text"
+              value={loginUsername}
+              onChange={(event) => setLoginUsername(event.target.value)}
+              autoComplete="username"
+            />
+          </label>
+          <label className="login-field">
+            <span>Password</span>
+            <input
+              type="password"
+              value={loginPassword}
+              onChange={(event) => setLoginPassword(event.target.value)}
+              autoComplete="current-password"
+            />
+          </label>
           {loginError && <div className="login-error" role="alert">{loginError}</div>}
-          <button type="submit" disabled={loginLoading}>{loginLoading ? "Signing in…" : "Sign in"}</button>
+          <button className="login-submit" type="submit" disabled={loginLoading}>
+            {loginLoading && <span className="login-spinner" aria-hidden="true" />}
+            {loginLoading ? "Signing in..." : "Sign In"}
+          </button>
         </form>
       </div>
     );
