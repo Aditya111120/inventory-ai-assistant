@@ -1,9 +1,11 @@
 import {
+  Component,
   useEffect,
   useCallback,
   useMemo,
   useRef,
   useState,
+  useId,
 } from "react";
 import {
   Bot,
@@ -746,9 +748,294 @@ function ResultTable({ rows, intent = null, display = null }) {
   );
 }
 
+const CHART_COLORS = ["#7652c6", "#db8b39", "#3d9b78", "#cf5e78", "#4b83bd", "#8f6c37"];
+
+function chartNumber(value, series) {
+  if (!Number.isFinite(value)) return "—";
+  if (series?.unit === "currency" && series.currency) {
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: "currency",
+        currency: series.currency,
+        maximumFractionDigits: 2,
+      }).format(value);
+    } catch {
+      return `${value.toLocaleString()} ${series.currency}`;
+    }
+  }
+  if (series?.unit === "percent") return `${value.toLocaleString()}%`;
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
+}
+
+function validVisualization(spec) {
+  if (!spec || !["kpi", "bar", "line", "donut", "grouped_bar", "scatter"].includes(spec.type)) return false;
+  if (typeof spec.title !== "string" || typeof spec.description !== "string") return false;
+  if (!Array.isArray(spec.series) || !spec.series.length || !Array.isArray(spec.data) || !spec.data.length) return false;
+  if (spec.series.some((item) => !item || typeof item.key !== "string" || typeof item.label !== "string"
+    || (item.unit === "currency" && typeof item.currency !== "string"))) return false;
+  if (spec.type === "kpi") return spec.data.every((point) => point && typeof point.label === "string"
+    && Number.isFinite(point.value) && !(point.unit === "currency" && typeof point.currency !== "string"));
+  if (spec.type === "donut") {
+    return spec.data.length <= 6 && spec.data.every((point) => point && typeof point.label === "string" && Number.isFinite(point.count) && point.count >= 0);
+  }
+  if (spec.type === "line") {
+    return typeof spec.date_field === "string"
+      && spec.series.length === 1
+      && spec.data.every((point) => point && typeof point[spec.date_field] === "string"
+        && Number.isFinite(Date.parse(point[spec.date_field]))
+        && Number.isFinite(point[spec.series[0].key]));
+  }
+  if (spec.type === "scatter") {
+    return spec.series.length >= 2
+      && spec.data.every((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
+  }
+  return typeof spec.category_field === "string"
+    && spec.data.every((point) => point && typeof point[spec.category_field] === "string"
+      && spec.series.every((series) => Number.isFinite(point[series.key])));
+}
+
+function Visualization({ spec }) {
+  if (!validVisualization(spec)) return null;
+  return (
+    <ChartErrorBoundary>
+      <ChartGraphic spec={spec} />
+    </ChartErrorBoundary>
+  );
+}
+
+function ChartGraphic({ spec }) {
+  const width = 760;
+  const height = 300;
+  const left = 170;
+  const isCategoryChart = spec.type === "bar" || spec.type === "grouped_bar";
+  const longestValueLabel = isCategoryChart
+    ? Math.max(...spec.data.flatMap((point) => spec.series.map((series) => chartNumber(point[series.key], series).length)))
+    : 0;
+  const right = isCategoryChart ? Math.min(width * 0.4, Math.max(30, longestValueLabel * 6 + 16)) : 30;
+  const top = 24;
+  const bottom = 35;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const colors = spec.series.map((_, index) => CHART_COLORS[index % CHART_COLORS.length]);
+  const legend = (
+    <div className="visualization-legend">
+      {spec.series.map((series, index) => (
+        <span key={series.key}>
+          <i style={{ "--series-color": colors[index] }} />
+          {series.label}
+        </span>
+      ))}
+    </div>
+  );
+
+  let graphic = null;
+  if (spec.type === "kpi") {
+    graphic = (
+      <div className="visualization-kpis">
+        {spec.data.map((point) => (
+          <div className="visualization-kpi" key={point.label}>
+            <span>{point.label}</span>
+            <strong>{chartNumber(point.value, point)}</strong>
+          </div>
+        ))}
+      </div>
+    );
+  } else if (spec.type === "donut") {
+    const total = spec.data.reduce((sum, point) => sum + point.count, 0);
+    if (total <= 0) return null;
+    const circumference = 2 * Math.PI * 68;
+    graphic = (
+      <div className="visualization-donut-layout">
+        <svg className="visualization-svg donut-svg" viewBox="0 0 180 180" role="img" aria-label={spec.title}>
+          <g transform="rotate(-90 90 90)">
+            {spec.data.map((point, index) => {
+              const offset = spec.data
+                .slice(0, index)
+                .reduce((sum, item) => sum + circumference * item.count / total, 0);
+              const length = circumference * point.count / total;
+              return (
+                <circle
+                  key={point.label}
+                  cx="90"
+                  cy="90"
+                  r="68"
+                  fill="none"
+                  stroke={CHART_COLORS[index % CHART_COLORS.length]}
+                  strokeWidth="28"
+                  strokeDasharray={`${length} ${circumference - length}`}
+                  strokeDashoffset={-offset}
+                >
+                  <title>{`${point.label}: ${chartNumber(point.count, { unit: "units" })}`}</title>
+                </circle>
+              );
+            })}
+          </g>
+          <text x="90" y="86" textAnchor="middle" className="donut-total">{total.toLocaleString()}</text>
+          <text x="90" y="105" textAnchor="middle" className="donut-total-label">positions</text>
+        </svg>
+        <div className="visualization-legend donut-legend">
+          {spec.data.map((point, index) => (
+            <span key={point.label}>
+              <i style={{ "--series-color": CHART_COLORS[index % CHART_COLORS.length] }} />
+              {point.label}: {chartNumber(point.count, { unit: "units" })}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  } else if (spec.type === "line") {
+    const points = spec.data
+      .map((item) => ({ ...item, timestamp: Date.parse(item[spec.date_field]) }))
+      .sort((a, b) => a.timestamp - b.timestamp);
+    if (points.length < 2) return null;
+    const values = points.map((point) => point[spec.series[0].key]);
+    const minValue = Math.min(0, ...values);
+    const maxValue = Math.max(1, ...values);
+    const x = (index) => left + index * plotWidth / (points.length - 1);
+    const y = (value) => top + (maxValue - value) / (maxValue - minValue || 1) * plotHeight;
+    graphic = (
+      <>
+        <svg className="visualization-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={spec.title}>
+          {[0, 0.5, 1].map((fraction) => {
+            const value = maxValue - fraction * (maxValue - minValue);
+            const yPosition = top + fraction * plotHeight;
+            return (
+              <g key={fraction}>
+                <line x1={left} y1={yPosition} x2={width - right} y2={yPosition} className="chart-gridline" />
+                <text x={left - 10} y={yPosition + 4} textAnchor="end" className="chart-axis-label">
+                  {chartNumber(value, spec.series[0])}
+                </text>
+              </g>
+            );
+          })}
+          <polyline
+            fill="none"
+            stroke={colors[0]}
+            strokeWidth="3"
+            points={points.map((point, index) => `${x(index)},${y(point[spec.series[0].key])}`).join(" ")}
+          />
+          {points.map((point, index) => (
+            <g key={point[spec.date_field]}>
+              <circle cx={x(index)} cy={y(point[spec.series[0].key])} r="5" fill={colors[0]}>
+                <title>{`${point[spec.date_field]}: ${chartNumber(point[spec.series[0].key], spec.series[0])}`}</title>
+              </circle>
+              <text x={x(index)} y={height - 10} textAnchor="middle" className="chart-axis-label">{point[spec.date_field]}</text>
+            </g>
+          ))}
+        </svg>
+        {legend}
+      </>
+    );
+  } else if (spec.type === "scatter") {
+    const xValues = spec.data.map((point) => point.x);
+    const yValues = spec.data.map((point) => point.y);
+    const xMin = Math.min(0, ...xValues);
+    const xMax = Math.max(1, ...xValues);
+    const yMin = Math.min(0, ...yValues);
+    const yMax = Math.max(1, ...yValues);
+    graphic = (
+      <svg className="visualization-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={spec.title}>
+        <line x1={left} y1={top + plotHeight} x2={width - right} y2={top + plotHeight} className="chart-axis" />
+        <line x1={left} y1={top} x2={left} y2={top + plotHeight} className="chart-axis" />
+        {spec.data.map((point, index) => (
+          <circle
+            key={`${point.label}-${index}`}
+            cx={left + (point.x - xMin) / (xMax - xMin || 1) * plotWidth}
+            cy={top + plotHeight - (point.y - yMin) / (yMax - yMin || 1) * plotHeight}
+            r="5"
+            fill={colors[0]}
+            opacity=".78"
+          >
+            <title>{`${point.label}: ${spec.series[0].label} ${chartNumber(point.x, spec.series[0])}, ${spec.series[1].label} ${chartNumber(point.y, spec.series[1])}`}</title>
+          </circle>
+        ))}
+        <text x={left + plotWidth / 2} y={height - 6} textAnchor="middle" className="chart-axis-label">{spec.series[0].label}</text>
+        <text x="16" y={top + plotHeight / 2} transform={`rotate(-90 16 ${top + plotHeight / 2})`} textAnchor="middle" className="chart-axis-label">{spec.series[1].label}</text>
+      </svg>
+    );
+  } else {
+    const values = spec.data.flatMap((point) => spec.series.map((series) => point[series.key]));
+    const minValue = Math.min(0, ...values);
+    const maxValue = Math.max(1, ...values);
+    const scale = (value) => (value - minValue) / (maxValue - minValue || 1) * plotWidth;
+    const baseline = left + scale(0);
+    const groupHeight = Math.min(34, plotHeight / spec.data.length);
+    const barHeight = Math.min(13, (groupHeight - 3) / spec.series.length);
+    graphic = (
+      <>
+        <svg className="visualization-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={spec.title}>
+          <line x1={baseline} y1={top} x2={baseline} y2={top + plotHeight} className="chart-axis" />
+          {spec.data.map((point, rowIndex) => {
+            const yStart = top + rowIndex * plotHeight / spec.data.length;
+            const fullLabel = point[spec.category_field];
+            return (
+              <g key={`${fullLabel}-${rowIndex}`}>
+                <text x={left - 10} y={yStart + groupHeight / 2 + 4} textAnchor="end" className="chart-axis-label">
+                  <title>{fullLabel}</title>
+                  {fullLabel.length > 24 ? `${fullLabel.slice(0, 22)}…` : fullLabel}
+                </text>
+                {spec.series.map((series, seriesIndex) => {
+                  const value = point[series.key];
+                  const valueX = left + scale(value);
+                  const x = Math.min(baseline, valueX);
+                  const barWidth = Math.abs(valueX - baseline);
+                  const y = yStart + (groupHeight - spec.series.length * barHeight) / 2 + seriesIndex * barHeight;
+                  return (
+                    <g key={series.key}>
+                      <rect x={x} y={y} width={Math.max(barWidth, 1)} height={Math.max(barHeight - 2, 4)} fill={colors[seriesIndex]} rx="3">
+                        <title>{`${fullLabel} — ${series.label}: ${chartNumber(value, series)}`}</title>
+                      </rect>
+                      <text x={valueX + (value >= 0 ? 5 : -5)} y={y + barHeight - 3} textAnchor={value >= 0 ? "start" : "end"} className="chart-value-label">
+                        {chartNumber(value, series)}
+                      </text>
+                    </g>
+                  );
+                })}
+              </g>
+            );
+          })}
+        </svg>
+        {legend}
+      </>
+    );
+  }
+
+  return (
+    <section className="visualization-card" aria-label="Analytical visualization">
+      <div className="visualization-heading">
+        <h3>{spec.title}</h3>
+        {spec.description && <p>{spec.description}</p>}
+      </div>
+      {graphic}
+      {spec.limitation && <p className="visualization-limitation">{spec.limitation}</p>}
+      {spec.reporting_period && <p className="visualization-period">Reporting period: {spec.reporting_period}</p>}
+    </section>
+  );
+}
+
+class ChartErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (this.state.failed) {
+      return <p className="visualization-fallback" role="status">Visualization unavailable; the analytical answer is still available.</p>;
+    }
+    return this.props.children;
+  }
+}
+
 function AssistantMessage({ payload, onFollowup }) {
   const [supportingDataOpen, setSupportingDataOpen] = useState(false);
+  const [supportingVisualizationOpen, setSupportingVisualizationOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const evidenceId = useId();
   if (!payload) return null;
 
   if (payload.status !== "ok") {
@@ -823,21 +1110,9 @@ function AssistantMessage({ payload, onFollowup }) {
   const summaryOnly = response.summary_only === true || payload.display?.summary_only === true;
   const display = { columns: response.display_columns || payload.display?.columns };
   const presentation = payload.display || {};
-  const trust = payload.trust_panel || {};
-  const queryEvidence = trust.query && (
-    trust.query.row_count != null
-    || trust.query.returned_result_rows != null
-    || Boolean(trust.query.result_counts)
-    || Boolean(trust.query.sql?.length)
-    || Boolean(trust.query.params?.length)
-  );
-  const answerFacts = payload.answer_facts || response.answer_facts;
-  const hasAnalyticalEvidence = Boolean(
-    rows.length
-    || payload.intent?.capability
-    || queryEvidence
-    || Object.keys(answerFacts || {}).length
-  );
+  const visualizationSpec = payload.visualization || response.visualization;
+  const hasVisualization = validVisualization(visualizationSpec);
+  const hasSupportingData = rows.length > 0 && !summaryOnly;
 
   return (
     <div className="message-row assistant-row">
@@ -854,11 +1129,29 @@ function AssistantMessage({ payload, onFollowup }) {
           <div className={`basis-pill ${simulated ? "simulated" : "actual"}`}>
             {simulated ? "Simulated" : "Actual"}
           </div>
-          {hasAnalyticalEvidence && (
+          {hasVisualization && (
             <button
               type="button"
               className="supporting-data-button"
+              aria-label="Supporting Visualization"
+              aria-expanded={supportingVisualizationOpen}
+              aria-controls={`${evidenceId}-visualization`}
+              onClick={() => setSupportingVisualizationOpen((value) => !value)}
+            >
+              <PackageSearch size={14} aria-hidden="true" />
+              Supporting Visualization
+              {supportingVisualizationOpen
+                ? <ChevronDown size={14} aria-hidden="true" />
+                : <ChevronRight size={14} aria-hidden="true" />}
+            </button>
+          )}
+          {hasSupportingData && (
+            <button
+              type="button"
+              className="supporting-data-button"
+              aria-label="Supporting Data"
               aria-expanded={supportingDataOpen}
+              aria-controls={`${evidenceId}-data`}
               onClick={() => setSupportingDataOpen((value) => !value)}
             >
               <Database size={14} aria-hidden="true" />
@@ -870,43 +1163,40 @@ function AssistantMessage({ payload, onFollowup }) {
           )}
         </div>
 
+        <div id={`${evidenceId}-visualization`} hidden={!supportingVisualizationOpen}>
+          {supportingVisualizationOpen && <Visualization spec={visualizationSpec} />}
+        </div>
+
         {presentation.shared_snapshot_date && (
           <div className="snapshot-label">Stock recorded on {presentation.shared_snapshot_date}</div>
         )}
 
-        {supportingDataOpen && (
-          <div className="result-section">
-            <div className="section-label">
-              Supporting Data
+        <div id={`${evidenceId}-data`} hidden={!supportingDataOpen}>
+          {supportingDataOpen && (
+            <div className="result-section">
+              <div className="section-label">Supporting Data</div>
+              {(() => {
+                const hasMore = response.has_more === true;
+
+                return (
+                  <>
+                    <ResultTable rows={expanded ? rows : initialRows} intent={payload.intent} display={display} />
+
+                    {hasMore && (
+                      <button type="button" className="results-toggle" onClick={() => setExpanded((value) => !value)}>
+                        {expanded
+                          ? "Show less"
+                          : response.available_result_count < response.total_result_count
+                            ? `View ${response.available_result_count} returned rows (${response.total_result_count} matching)`
+                            : `View all ${response.total_result_count || rows.length} matching results`}
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
             </div>
-
-            {!rows.length || summaryOnly ? (
-              <p className="supporting-data-empty" role="status">
-                No supporting records available
-              </p>
-            ) : (
-              (() => {
-              const hasMore = response.has_more === true;
-
-              return (
-                <>
-                  <ResultTable rows={expanded ? rows : initialRows} intent={payload.intent} display={display} />
-
-                  {hasMore && (
-                    <button type="button" className="results-toggle" onClick={() => setExpanded((value) => !value)}>
-                      {expanded
-                        ? "Show less"
-                        : response.available_result_count < response.total_result_count
-                          ? `View ${response.available_result_count} returned rows (${response.total_result_count} matching)`
-                          : `View all ${response.total_result_count || rows.length} matching results`}
-                    </button>
-                  )}
-                </>
-              );
-              })()
-            )}
-          </div>
-        )}
+          )}
+        </div>
 
         {suggestedQuestions(payload).length > 0 && (
           <div className="suggestion-section">
