@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from app.llm.client import Usage
 from app.llm.prompts import build_messages
-from app.llm.schema import Intent, strict_json_schema
+from app.llm.schema import Intent, Scenario, TimeWindow, strict_json_schema
 
 
 class IntentError(RuntimeError):
@@ -157,8 +157,47 @@ def _normalise(intent: Intent, question: str = "") -> Intent:
         r"\b(?:inventory|stock|on[- ]hand|on hand|quantity)\b",
         text,
     ))
+    scenario_change = re.search(
+        r"\b(?:demand|sales)\s+(increases?|increased|rises?|raised|"
+        r"decreases?|decreased|falls?|drops?)\s+(?:by\s+)?"
+        r"(\d+(?:\.\d+)?)\s*%",
+        text,
+    )
+    explicit_what_if = bool(
+        scenario_change
+        and re.search(r"\b(?:what[- ]if|if|simulate|simulation|scenario)\b", text)
+    )
+    historical_request = bool(
+        inventory_request
+        and re.search(
+            r"\b(?:historical|history|snapshots?|over time|trend over time)\b",
+            text,
+        )
+    )
+    period_compare = bool(
+        re.search(r"\b(?:current|this)\s+month\b", text)
+        and re.search(r"\b(?:previous|prior|last)\s+month\b", text)
+        and re.search(r"\b(?:compare|comparison|versus|vs\.?)\b", text)
+    )
 
-    if can_normalize_analytical_request and (
+    if can_normalize_analytical_request and explicit_what_if:
+        amount = float(scenario_change.group(2))
+        direction = scenario_change.group(1)
+        if direction.startswith(("decreas", "fall", "drop")):
+            amount = -amount
+        intent.capability = "what_if"
+        intent.question_kind = "scenario"
+        intent.scenario = Scenario(kind="demand_change_pct", value=amount)
+        intent.metrics = ["days_of_inventory"]
+        if re.search(r"\b(?:for|by|per)\s+(?:each\s+)?products?\b", text):
+            intent.group_by = "product"
+    elif can_normalize_analytical_request and historical_request:
+        intent.capability = "historical_analysis"
+        intent.question_kind = "comparison"
+        intent.metrics = ["quantity"]
+        if intent.time.kind == "none":
+            intent.time = TimeWindow(kind="latest")
+    elif can_normalize_analytical_request and (
         no_sales_request or slow_moving_request or excess_request or excess_level_request
     ):
         if no_sales_request:
@@ -220,6 +259,51 @@ def _normalise(intent: Intent, question: str = "") -> Intent:
             if explicit_visibility_request or not intent.metrics:
                 intent.metrics = ["quantity"]
 
+    # Preserve multiple explicitly requested measures so the result can be
+    # dispatched at one entity grain and rendered as a scatter plot.
+    compare_measures = bool(re.search(
+        r"\b(?:compare|comparison|relationship|correlation|versus|vs\.?|against)\b",
+        text,
+    ))
+    explicit_measure_patterns = (
+        ("quantity", r"\b(?:quantity(?:\s+on\s+hand)?|on[- ]hand\s+quantity|inventory\s+units|stock\s+units)\b"),
+        ("inventory_value", r"\b(?:inventory\s+value|stock\s+value|inventory\s+worth)\b"),
+        ("sales_units", r"\b(?:sales\s+units|units\s+(?:sold|sales))\b"),
+        ("sales_revenue", r"\b(?:sales\s+revenue|revenue|turnover)\b"),
+        ("days_of_inventory", r"\b(?:days\s+of\s+inventory|inventory\s+coverage\s+days)\b"),
+    )
+    explicit_measures = [
+        (match.start(), metric)
+        for metric, pattern in explicit_measure_patterns
+        if (match := re.search(pattern, text))
+    ]
+    explicit_measures = [
+        metric for _, metric in sorted(explicit_measures)
+    ]
+    if (
+        can_normalize_analytical_request
+        and compare_measures
+        and len(explicit_measures) >= 2
+        and len(set(explicit_measures)) >= 2
+    ):
+        inventory_measures = {"quantity", "inventory_value", "days_of_inventory"}
+        sales_measures = {"sales_units", "sales_revenue"}
+        selected = list(dict.fromkeys(explicit_measures))
+        if set(selected).issubset(inventory_measures):
+            intent.capability = "inventory_visibility"
+            intent.metrics = selected
+        elif set(selected).issubset(sales_measures):
+            intent.capability = "sales_trend"
+            intent.metrics = selected
+
+    if (
+        can_normalize_analytical_request
+        and re.search(r"\b(?:inventory|stock)\s+health\b|\bstatus\s+breakdown\b", text)
+        and not stockout_request
+    ):
+        intent.capability = "inventory_health"
+        intent.metrics = ["stock_status", "stockout_risk"]
+
     # A catalog browse is an inventory-backed grouped lookup, not a new query
     # capability. Keep it distinct from metric comparisons so the whole list
     # remains available to the existing result table.
@@ -278,6 +362,15 @@ def _normalise(intent: Intent, question: str = "") -> Intent:
             "comparison_month": second_month, "comparison_year": second_year,
             "compare_to_previous": False,
         })
+    elif period_compare and intent.capability == "sales_trend":
+        intent.time = intent.time.model_copy(update={
+            "kind": "this_month",
+            "compare_to_previous": True,
+            "month": None,
+            "year": None,
+            "comparison_month": None,
+            "comparison_year": None,
+        })
     elif re.search(r"\bbetween\b", text) and len(month_years) == 2:
         _, first_month, first_year = month_years[0]
         _, second_month, second_year = month_years[1]
@@ -329,7 +422,8 @@ def _normalise(intent: Intent, question: str = "") -> Intent:
         text,
     )
     if comparison_word or between_entities:
-        intent.question_kind = "comparison"
+        if intent.capability != "what_if":
+            intent.question_kind = "comparison"
         intent.uses_previous_result = False
         if intent.group_by is None:
             grouped_filters = [
@@ -350,13 +444,13 @@ def _normalise(intent: Intent, question: str = "") -> Intent:
 
     if intent.group_by is None:
         for pattern, dimension in (
-            (r"\bby\s+(?:product|products|item|items)\b", "product"),
-            (r"\bby\s+brands?\b", "brand"),
-            (r"\bby\s+categories\b|\bby\s+category\b", "category"),
-            (r"\bby\s+subcategories\b|\bby\s+subcategory\b", "subcategory"),
-            (r"\bby\s+stores?\b", "store"),
-            (r"\bby\s+cities\b|\bby\s+city\b", "city"),
-            (r"\bby\s+regions?\b", "region"),
+            (r"\b(?:by|for each|for|per)\s+(?:the\s+)?(?:product|products|item|items)\b", "product"),
+            (r"\b(?:by|for each|for|per)\s+(?:the\s+)?brands?\b", "brand"),
+            (r"\b(?:by|for each|for|per)\s+(?:the\s+)?categories\b|\bby\s+category\b", "category"),
+            (r"\b(?:by|for each|for|per)\s+(?:the\s+)?subcategories\b|\bby\s+subcategory\b", "subcategory"),
+            (r"\b(?:by|for each|for|per)\s+(?:the\s+)?stores?\b", "store"),
+            (r"\b(?:by|for each|for|per)\s+(?:the\s+)?cities\b|\bby\s+city\b", "city"),
+            (r"\b(?:by|for each|for|per)\s+(?:the\s+)?regions?\b", "region"),
         ):
             if re.search(pattern, text):
                 intent.group_by = dimension
@@ -436,4 +530,19 @@ def _normalise(intent: Intent, question: str = "") -> Intent:
         )
     if intent.limit is not None and intent.limit <= 0:
         intent.limit = None
+    if intent.visualization_goal == "automatic":
+        if re.search(r"\b(?:relationship|correlation|correlate)\b", text):
+            intent.visualization_goal = "relationship"
+        elif re.search(r"\b(?:trend|over time|chronological|month(?:ly)? trend)\b", text):
+            intent.visualization_goal = "trend"
+        elif re.search(r"\b(?:distribution|proportion|percentage|percent|composition|breakdown)\b", text):
+            intent.visualization_goal = "distribution"
+        elif re.search(r"\b(?:detailed records|full table|all records|list all)\b", text):
+            intent.visualization_goal = "detailed_records"
+        elif intent.question_kind == "ranking":
+            intent.visualization_goal = "ranking"
+        elif intent.question_kind == "comparison":
+            intent.visualization_goal = "comparison"
+        elif re.search(r"\b(?:total|overall count|how many)\b", text):
+            intent.visualization_goal = "kpi"
     return intent

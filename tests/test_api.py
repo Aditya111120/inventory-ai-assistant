@@ -34,6 +34,7 @@ class FakeResponse:
         narration_regenerated=False,
         narration_fallback=False,
         followups=None,
+        visualization=None,
     ):
         self.session_id = session_id
         self.status = status
@@ -77,6 +78,7 @@ class FakeResponse:
         self.narration_regenerated = narration_regenerated
         self.narration_fallback = narration_fallback
         self.followups = followups or []
+        self.visualization = visualization
 
 
 class FakeOrchestrator:
@@ -323,6 +325,43 @@ def test_chat_returns_table_and_trust_panel():
     ]
     assert body["response"]["display_rows"] == body["table"]
     assert body["response"]["has_more"] is False
+
+
+def test_chat_response_passes_validated_visualization_metadata_at_both_levels():
+    fake = FakeOrchestrator()
+    fake.response.visualization = {
+        "type": "bar",
+        "title": "Inventory value by category",
+        "description": "Sorted by value, highest first.",
+        "category_field": "label",
+        "series": [{"key": "value", "label": "Inventory value", "unit": "currency", "currency": "INR"}],
+        "data": [{"label": "Laptops", "value": 1200}],
+        "basis": "Actual",
+        "complete": True,
+    }
+    client = TestClient(create_app(lambda: fake))
+
+    response = client.post("/chat", json={"question": "Show inventory value by category"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["visualization"]["type"] == "bar"
+    assert body["response"]["visualization"] == body["visualization"]
+    assert body["visualization"]["data"][0] == {"label": "Laptops", "value": 1200}
+
+
+def test_invalid_visualization_metadata_does_not_fail_analytical_chat():
+    fake = FakeOrchestrator()
+    fake.response.visualization = {"type": "unsupported", "data": []}
+    client = TestClient(create_app(lambda: fake))
+
+    response = client.post("/chat", json={"question": "Show inventory"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["narrative"] == fake.response.narrative
+    assert body["visualization"] is None
+    assert body["response"]["visualization"] is None
 
 
 def test_chat_restores_last_successful_structured_context_from_history():

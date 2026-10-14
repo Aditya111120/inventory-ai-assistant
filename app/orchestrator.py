@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import pandas as pd
-
 from app.answer_builder import (
     build_answer,
     build_subject_comparison_answer,
@@ -38,6 +37,7 @@ from app.response_composer import (
 )
 from app.response_router import plan_response
 from app.session import SessionMemory
+from app.visualization import select_visualization
 
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,7 @@ class OrchestratorResponse:
     pending_clarification_id: Optional[str] = None
     resolved_context: dict[str, Any] = field(default_factory=dict)
     answer_facts: Optional[dict[str, Any]] = None
+    visualization: Optional[dict[str, Any]] = None
 
 
 def _intent_summary(intent) -> str:
@@ -603,23 +604,38 @@ def _leadership_defaults(question: str, intent, user_context: UserContext):
         if getattr(intent.time, "kind", "none") == "none":
             updates["time"] = intent.time.model_copy(update={"kind": "latest"})
         updates.setdefault("question_kind", "lookup")
-    if re.search(r"\b(?:compare|versus|vs\.?)\b", text):
+    if (
+        getattr(intent, "capability", "") == "historical_analysis"
+        and re.search(r"\b(?:latest|available|weekly)?\s*snapshots?\b", text)
+        and not re.search(
+            r"\b(?:by|for each|per)\s+(?:products?|items?|brands?|categories?|stores?|cities?|regions?)\b",
+            text,
+        )
+    ):
+        updates["group_by"] = None
+    scenario_request = (
+        getattr(intent, "capability", "") == "what_if"
+        or getattr(intent, "scenario", None) is not None
+    )
+    preserve_multiple_metrics = len(getattr(intent, "metrics", []) or []) > 1
+    if re.search(r"\b(?:compare|versus|vs\.?)\b", text) and not scenario_request:
         updates["question_kind"] = "comparison"
-        updates["metrics"] = []
-        if re.search(r"\b(?:inventory value|stock value|value)\b", text):
-            updates["metrics"] = ["inventory_value"]
-        elif re.search(r"\b(?:inventory|stock|quantity|units on hand)\b", text):
-            updates["metrics"] = ["quantity"]
-        elif re.search(r"\b(?:revenue|turnover)\b", text):
-            updates.update(capability="sales_trend", metrics=["sales_revenue"])
-        elif re.search(r"\b(?:sales units|units sold|sold units)\b", text):
-            updates.update(capability="sales_trend", metrics=["sales_units"])
-        elif re.search(r"\bsales\b", text):
-            # "Sales" can mean volume or revenue. Do not silently choose a
-            # metric for a comparison; the orchestrator will offer choices.
-            updates["capability"] = "sales_trend"
-        elif re.search(r"\b(?:risk|stockout)\b", text):
-            updates.update(capability="stockout_risk", metrics=["stockout_risk"])
+        if not preserve_multiple_metrics:
+            updates["metrics"] = []
+            if re.search(r"\b(?:inventory value|stock value|value)\b", text):
+                updates["metrics"] = ["inventory_value"]
+            elif re.search(r"\b(?:inventory|stock|quantity|units on hand)\b", text):
+                updates["metrics"] = ["quantity"]
+            elif re.search(r"\b(?:revenue|turnover)\b", text):
+                updates.update(capability="sales_trend", metrics=["sales_revenue"])
+            elif re.search(r"\b(?:sales units|units sold|sold units)\b", text):
+                updates.update(capability="sales_trend", metrics=["sales_units"])
+            elif re.search(r"\bsales\b", text):
+                # "Sales" can mean volume or revenue. Do not silently choose a
+                # metric for a comparison; the orchestrator will offer choices.
+                updates["capability"] = "sales_trend"
+            elif re.search(r"\b(?:risk|stockout)\b", text):
+                updates.update(capability="stockout_risk", metrics=["stockout_risk"])
         filters = getattr(intent, "filters", None)
         for field, dimension in (("brands", "brand"), ("categories", "category"), ("stores", "store"), ("cities", "city"), ("products", "product"), ("regions", "region")):
             if len(getattr(filters, field, []) or []) > 1:
@@ -669,24 +685,25 @@ def _leadership_defaults(question: str, intent, user_context: UserContext):
                         "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
         raw_count = count_match.group(1)
         updates["limit"] = number_words.get(raw_count, int(raw_count) if raw_count.isdigit() else 1)
-    if re.search(r"\binventory value\b|\bstock value\b|\bvalue of inventory\b", text):
-        updates["metrics"] = ["inventory_value"]
-        if updates.get("question_kind") == "ranking" or re.search(r"\b(?:highest|top|most|rank|ranking)\b", text):
-            updates["sort"] = Sort(by="inventory_value", direction="desc")
-    elif re.search(r"\b(?:sales revenue|revenue|turnover)\b", text):
-        updates["metrics"] = ["sales_revenue"]
-        if re.search(r"\b(?:highest|top|most|lowest|bottom|rank|ranking|best|worst)\b", text):
-            updates["sort"] = Sort(
-                by="sales_revenue",
-                direction="asc" if re.search(r"\b(?:lowest|bottom|worst)\b", text) else "desc",
-            )
-    elif re.search(r"\b(?:units sold|sales units|sold the most|sold the least)\b", text):
-        updates["metrics"] = ["sales_units"]
-        if re.search(r"\b(?:highest|top|most|lowest|bottom|least|rank|ranking)\b", text):
-            updates["sort"] = Sort(
-                by="sales_units",
-                direction="asc" if re.search(r"\b(?:lowest|bottom|least)\b", text) else "desc",
-            )
+    if not preserve_multiple_metrics and not scenario_request:
+        if re.search(r"\binventory value\b|\bstock value\b|\bvalue of inventory\b", text):
+            updates["metrics"] = ["inventory_value"]
+            if updates.get("question_kind") == "ranking" or re.search(r"\b(?:highest|top|most|rank|ranking)\b", text):
+                updates["sort"] = Sort(by="inventory_value", direction="desc")
+        elif re.search(r"\b(?:sales revenue|revenue|turnover)\b", text):
+            updates["metrics"] = ["sales_revenue"]
+            if re.search(r"\b(?:highest|top|most|lowest|bottom|rank|ranking|best|worst)\b", text):
+                updates["sort"] = Sort(
+                    by="sales_revenue",
+                    direction="asc" if re.search(r"\b(?:lowest|bottom|worst)\b", text) else "desc",
+                )
+        elif re.search(r"\b(?:units sold|sales units|sold the most|sold the least)\b", text):
+            updates["metrics"] = ["sales_units"]
+            if re.search(r"\b(?:highest|top|most|lowest|bottom|least|rank|ranking)\b", text):
+                updates["sort"] = Sort(
+                    by="sales_units",
+                    direction="asc" if re.search(r"\b(?:lowest|bottom|least)\b", text) else "desc",
+                )
     if updates:
         return intent.model_copy(update=updates)
     return intent
@@ -909,6 +926,7 @@ def _presentation(result: pd.DataFrame, intent, question: str = "") -> tuple[pd.
         result["inventory_snapshot_date"] = result["snapshot_date"]
     kind = getattr(intent, "question_kind", "lookup")
     capability = getattr(intent, "capability", "")
+    aggregate_classification_comparison = False
     if kind == "comparison" and getattr(intent, "group_by", None) in {"brand", "category", "store", "city", "region", "product"}:
         response_type = "comparison"
         dimension_column = {"store": "store_name", "product": "product_name"}.get(intent.group_by, intent.group_by)
@@ -917,7 +935,13 @@ def _presentation(result: pd.DataFrame, intent, question: str = "") -> tuple[pd.
         metric_column = value_columns.get(metrics[0] if metrics else "")
         if capability == "historical_analysis":
             metric_column = "qty_now"
-        wanted = [dimension_column, metric_column, "qty_before", "qty_change", "snapshot_date_before", "snapshot_date", "units_prev", "revenue_prev", "units_change", "growth_pct", "revenue_change", "revenue_growth_pct"]
+        if metrics and metrics[0] == "stockout_risk":
+            if metric_column not in result and "stockout_risk" in result:
+                metric_column = "stockout_risk"
+            aggregate_classification_comparison = metric_column in result
+            wanted = [dimension_column, "high_risk_positions"]
+        else:
+            wanted = [dimension_column, metric_column, "qty_before", "qty_change", "snapshot_date_before", "snapshot_date", "units_prev", "revenue_prev", "units_change", "growth_pct", "revenue_change", "revenue_growth_pct"]
     elif (
         kind == "ranking"
         or (
@@ -1003,7 +1027,11 @@ def _presentation(result: pd.DataFrame, intent, question: str = "") -> tuple[pd.
         if group_column and group_column in result.columns and group_column not in wanted:
             wanted.insert(0, group_column)
     text = question.casefold()
-    columns = [column for column in wanted if column in result.columns]
+    columns = (
+        [dimension_column, "high_risk_positions"]
+        if aggregate_classification_comparison
+        else [column for column in wanted if column in result.columns]
+    )
     include_identifiers = (
         not question
         or bool(re.search(r"\b(?:product\s*id|store\s*id|sku|identifier)\b", text))
@@ -1011,7 +1039,18 @@ def _presentation(result: pd.DataFrame, intent, question: str = "") -> tuple[pd.
     )
     if not include_identifiers:
         columns = [column for column in columns if column not in {"product_id", "store_id", "sku", "region"}]
-    view = result.loc[:, columns].copy()
+    if aggregate_classification_comparison:
+        view = (
+            result.groupby(dimension_column, dropna=False, sort=False)[metric_column]
+            .apply(lambda values: values.astype("string").str.casefold().eq("high").sum())
+            .rename("high_risk_positions")
+            .reset_index()
+        )
+        view = view.sort_values(
+            "high_risk_positions", ascending=False, kind="stable"
+        ).reset_index(drop=True)
+    else:
+        view = result.loc[:, columns].copy()
     # A LEFT JOIN intentionally exposes NULL subcategories.  Do not make an
     # all-unclassified default result look like a column of empty placeholders;
     # retain it only when the request explicitly concerns classification.  A
@@ -1035,6 +1074,8 @@ def _presentation(result: pd.DataFrame, intent, question: str = "") -> tuple[pd.
     # Initial presentation is deliberately compact for analytical result sets.
     counts = _result_counts(result)
     total_count = int(counts["matching_result_rows"])
+    if aggregate_classification_comparison:
+        total_count = len(view)
     explicit_detail = bool(
         re.search(r"\b(?:list|detailed?|detail|records?|all rows|full table|show all)\b", text)
     )
@@ -1061,7 +1102,12 @@ def _presentation(result: pd.DataFrame, intent, question: str = "") -> tuple[pd.
     # A selected store is already stated in the answer heading/narrative. Do
     # not repeat it on every row unless the question explicitly asks for
     # identifiers/details. Multi-store comparisons retain the column.
-    if explicit_store and not include_identifiers and store_count == 1:
+    if (
+        explicit_store
+        and not include_identifiers
+        and store_count == 1
+        and not aggregate_classification_comparison
+    ):
         columns = [c for c in columns if c not in {"store_name", "city", "region", "store_id"}]
         view = result.loc[:, columns].copy()
     if shared_snapshot and not explicit_date and "inventory_snapshot_date" in columns:
@@ -2090,12 +2136,31 @@ class Orchestrator:
                 for field in ("products", "brands", "categories", "stores", "cities", "regions")
             )
         )
+        comparison_time = getattr(intent, "time", None)
+        explicit_period_comparison = bool(
+            getattr(intent, "capability", "") == "sales_trend"
+            and comparison_time
+            and (
+                all(
+                    getattr(comparison_time, field, None) is not None
+                    for field in ("month", "year", "comparison_month", "comparison_year")
+                )
+                or all(
+                    getattr(comparison_time, field, None) is not None
+                    for field in (
+                        "start_date", "end_date",
+                        "comparison_start_date", "comparison_end_date",
+                    )
+                )
+            )
+        )
         if (
             getattr(intent, "question_kind", "") == "comparison"
             and getattr(intent, "comparison_mode", "none") != "subject_vs_scope"
             and not comparison_dimension_present
             and getattr(intent, "group_by", None) not in {"brand", "category", "store", "city", "region", "product"}
             and not getattr(getattr(intent, "time", None), "compare_to_previous", False)
+            and not explicit_period_comparison
         ):
             return OrchestratorResponse(
                 session_id=session_id,
@@ -2409,6 +2474,14 @@ class Orchestrator:
                     or getattr(filters, "categories", [])
                     or getattr(filters, "subcategories", [])
                 )
+                explicitly_grouped_location = bool(
+                    getattr(intent, "group_by", None) == "product"
+                    and (
+                        getattr(filters, "stores", [])
+                        or getattr(filters, "cities", [])
+                        or getattr(filters, "regions", [])
+                    )
+                )
                 if (
                     len(getattr(filters, "products", []) or []) == 1
                     and resolution.product_ids
@@ -2435,6 +2508,7 @@ class Orchestrator:
                     or getattr(filters, "brands", [])
                     or getattr(filters, "categories", [])
                     or getattr(filters, "subcategories", [])
+                    or explicitly_grouped_location
                 )
                 prior_target = bool(
                     getattr(intent, "uses_previous_result", False)
@@ -3011,7 +3085,11 @@ class Orchestrator:
 
         # Build and shorten the user-facing answer before evidence validation,
         # keeping technical calculation detail in the Trust Panel.
-        if not is_compound and result.df is not None and not result.df.empty:
+        if (
+            not is_compound
+            and result.df is not None
+            and not result.df.empty
+        ):
             narrative = complete_narrative_context(intent, result.df, narrative)
 
         historical_notes = [
@@ -3094,6 +3172,20 @@ class Orchestrator:
             effective_store_ids=effective_store_ids,
         )
         display_df, display = _presentation(result.df, intent, question)
+        visualization = None
+        try:
+            visualization = select_visualization(
+                intent=intent,
+                dataframe=result.df,
+                basis=result.basis,
+                presentation=display,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Visualization selection failed for capability=%s (%s)",
+                getattr(intent, "capability", "unknown"),
+                type(exc).__name__,
+            )
         response_type = display["type"]
         followups = build_followups(
             question=question,
@@ -3164,6 +3256,7 @@ class Orchestrator:
             followups=followups,
             resolved_context=resolved_context,
             answer_facts=answer_facts,
+            visualization=visualization,
             narration_verified=narration_verified,
             narration_regenerated=narration_regenerated,
             narration_fallback=narration_fallback,

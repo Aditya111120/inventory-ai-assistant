@@ -51,6 +51,16 @@ QuestionKind = Literal[
     "clarification",
     "out_of_scope",
 ]
+VisualizationGoal = Literal[
+    "automatic",
+    "kpi",
+    "ranking",
+    "comparison",
+    "distribution",
+    "trend",
+    "relationship",
+    "detailed_records",
+]
 AnalysisScope = Literal["unspecified", "organization", "store"]
 InventoryClassification = Literal[
     "excess_by_max_level",
@@ -145,6 +155,8 @@ class Intent(BaseModel):
     comparison_mode: ComparisonMode = "none"
     comparison_subject: Optional[str] = None
     question_kind: QuestionKind = "lookup"
+    visualization_goal: VisualizationGoal = "automatic"
+    visualization_preference: Optional[str] = None
     sub_questions: list[SubQuestion] = Field(default_factory=list)
     uses_previous_result: bool = False
     clarification_question: Optional[str] = None

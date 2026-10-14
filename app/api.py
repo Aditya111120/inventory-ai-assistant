@@ -13,7 +13,7 @@ import os
 
 from fastapi import Depends, FastAPI, Cookie, HTTPException, Query as FastAPIQuery, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.config import load_settings
 from app.db import connect, query
@@ -26,6 +26,7 @@ from app.repository import ExploreRepository, load_catalog, load_rules
 from app.semantic.queries import Queries
 from app.semantic.resolver import EntityResolver
 from app.session import SessionMemory
+from app.visualization import VisualizationSpec
 from app.context import UserContext, role_policy
 from app.history import ConversationStore, normalize_json_value
 from app.auth import AuthService
@@ -75,6 +76,7 @@ class ChatResponse(BaseModel):
     pending_clarification_id: str | None = None
     resolved_context: dict[str, Any] = Field(default_factory=dict)
     answer_facts: dict[str, Any] | None = None
+    visualization: VisualizationSpec | None = None
 
 
 def _auth_cookie_secure(request: Request) -> bool:
@@ -482,6 +484,18 @@ def create_app(
             if hasattr(response_intent, "model_dump")
             else response_intent
         )
+        visualization_payload = None
+        raw_visualization = getattr(response, "visualization", None)
+        if raw_visualization is not None:
+            try:
+                visualization_payload = VisualizationSpec.model_validate(
+                    raw_visualization
+                ).model_dump(mode="json")
+            except (TypeError, ValidationError) as exc:
+                logger.warning(
+                    "Skipping invalid visualization metadata (%s)",
+                    type(exc).__name__,
+                )
 
         display = getattr(response, "display", {})
         table = [] if display.get("summary_only", False) else _dataframe_records(response.data)
@@ -505,6 +519,7 @@ def create_app(
             "pending_clarification_id": getattr(response, "pending_clarification_id", None),
             "resolved_context": getattr(response, "resolved_context", {}),
             "answer_facts": getattr(response, "answer_facts", None),
+            "visualization": visualization_payload,
         }
         chat_response = ChatResponse(
             session_id=session_id,
@@ -537,6 +552,7 @@ def create_app(
             pending_clarification_id=getattr(response, "pending_clarification_id", None),
             resolved_context=getattr(response, "resolved_context", {}),
             answer_facts=getattr(response, "answer_facts", None),
+            visualization=visualization_payload,
         )
         normalized_response = normalize_json_value(chat_response.model_dump())
         if response.narrative or response.error:

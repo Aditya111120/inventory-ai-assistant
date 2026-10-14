@@ -655,6 +655,8 @@ class Queries:
             )
         if "store_id" in df.columns:
             counts["stores"] = int(df["store_id"].nunique(dropna=True))
+        if "city" in df.columns:
+            counts["cities"] = int(df["city"].nunique(dropna=True))
         risk_col = "stockout_risk_v1" if "stockout_risk_v1" in df.columns else "stockout_risk"
         if risk_col in df.columns:
             counts["high_risk_positions"] = int(df[risk_col].eq("High").sum())

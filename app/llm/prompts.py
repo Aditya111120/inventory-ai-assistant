@@ -13,13 +13,12 @@ recommendation, compound.
 
 Rules:
 - Copy entity names exactly; preserve explicit filters and periods.
-- Canonical terms: slow-moving/slow sellers -> excess_slow_moving +
-  slow_moving_candidate; no/zero recorded sales/never sold -> no_recorded_sales;
-  generic excess/overstock -> excess_slow_moving, null subtype (legacy rule);
-  explicit max-level/excess-coverage -> matching subtype; stockout/run-out risk ->
-  stockout_risk; sales/units sold -> sales_trend + sales_units; revenue/turnover ->
-  sales_trend + sales_revenue; current stock/on-hand -> inventory_visibility +
-  quantity.
+- Preserve goal/preference fields. Never generate values.
+- Map slow-moving -> excess_slow_moving + slow_moving_candidate; never sold ->
+  no_recorded_sales; generic excess/overstock -> excess_slow_moving (null subtype);
+  explicit max-level/coverage -> matching subtype; stockout/run-out -> stockout_risk;
+  units/sales -> sales_trend + sales_units; revenue/turnover -> sales_trend +
+  sales_revenue; on-hand -> inventory_visibility + quantity.
 - Catalog browse ("what brands/categories/products do we carry?") is a grouped,
   quantity-based inventory_visibility lookup, not a catalog-only list.
 - Never guess a store performance metric: "which store performs best?" uses
@@ -35,8 +34,7 @@ Rules:
   Subject-vs-scope and explain-subject comparisons preserve their distinct modes.
 - Use only a specifically requested excess subtype: excess_by_max_level,
   excess_coverage_candidate, slow_moving_candidate (1-2 units), or
-  no_recorded_sales (zero). Null preserves legacy behavior. Use null/[] when
-  unstated. Output JSON only."""
+  no_recorded_sales (zero). Null subtype preserves legacy behavior."""
 
 
 def build_messages(question: str, context: str = "") -> list[dict]:

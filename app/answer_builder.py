@@ -255,18 +255,40 @@ def validate_narrative_evidence(intent, df: pd.DataFrame, narrative: str) -> lis
             "city": "city", "region": "region", "product": "product_name",
         }.get(group)
         if group_column and group_column in df:
+            period_comparison = (
+                capability == "sales_trend"
+                and ("units_prev" in df.columns or "revenue_prev" in df.columns)
+            )
             group_label = {
                 "brand": "brands", "category": "categories", "store": "stores",
                 "city": "cities", "region": "regions", "product": "products",
             }.get(group, "groups")
-            if group_label.casefold() not in narrative.casefold():
+            if period_comparison:
+                if not any(
+                    label in narrative.casefold()
+                    for label in (group.casefold(), group_label.casefold(), group_column.casefold())
+                ):
+                    errors.append(f"period-comparison narrative does not name the requested {group} grouping")
+                comparison_column = _value_column(primary_metric or "")
+                if comparison_column and comparison_column in df:
+                    previous_column = f"{comparison_column}_prev"
+                    if previous_column in df:
+                        formatter = _inr if comparison_column in {"revenue", "inventory_value"} else _number
+                        for column in (comparison_column, previous_column):
+                            total = pd.to_numeric(df[column], errors="coerce").sum(min_count=1)
+                            if pd.notna(total) and formatter(total).casefold() not in narrative.casefold():
+                                errors.append(
+                                    f"period-comparison total for {column} does not match the grouped result"
+                                )
+                                break
+            elif group_label.casefold() not in narrative.casefold():
                 errors.append(f"comparison narrative does not name the requested {group} grouping")
             metric_column = _value_column(primary_metric or "")
             if metric_column and metric_column in df:
                 values = pd.to_numeric(df[metric_column], errors="coerce")
                 valid = df.loc[values.notna(), [group_column]].copy()
                 valid["_value"] = values[values.notna()].to_numpy()
-                if len(valid) >= 2:
+                if len(valid) >= 2 and not period_comparison:
                     high = valid.sort_values("_value", ascending=False, kind="stable").iloc[0]
                     low = valid.sort_values("_value", ascending=True, kind="stable").iloc[0]
                     formatter = _inr if metric_column in {"revenue", "inventory_value"} else _number

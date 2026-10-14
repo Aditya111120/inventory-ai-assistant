@@ -228,6 +228,59 @@ def test_generic_sales_brand_comparison_does_not_default_to_units():
     assert result.metrics == []
 
 
+def test_leadership_comparison_preserves_two_requested_scatter_metrics():
+    intent = make_intent("inventory_visibility").model_copy(update={
+        "metrics": ["quantity", "inventory_value"],
+        "group_by": "product",
+        "question_kind": "comparison",
+    })
+    result = _leadership_defaults(
+        "For each product, compare quantity on hand with inventory value.",
+        intent,
+        UserContext(persona="Leadership"),
+    )
+
+    assert result.question_kind == "comparison"
+    assert result.group_by == "product"
+    assert result.metrics == ["quantity", "inventory_value"]
+
+
+def test_leadership_scenario_keeps_scenario_kind_and_metrics():
+    intent = make_intent("what_if").model_copy(update={
+        "metrics": ["days_of_inventory"],
+        "group_by": "product",
+        "question_kind": "scenario",
+    })
+    result = _leadership_defaults(
+        "For products in Connaught Place, compare actual and simulated days of "
+        "inventory if demand increases by 20%.",
+        intent,
+        UserContext(persona="Leadership"),
+    )
+
+    assert result.capability == "what_if"
+    assert result.question_kind == "scenario"
+    assert result.group_by == "product"
+    assert result.metrics == ["days_of_inventory"]
+
+
+def test_leadership_latest_snapshot_question_does_not_invent_product_grouping():
+    intent = make_intent("historical_analysis").model_copy(update={
+        "metrics": ["quantity"],
+        "group_by": "product",
+        "question_kind": "comparison",
+    })
+    result = _leadership_defaults(
+        "Show inventory quantity across the latest two available snapshots.",
+        intent,
+        UserContext(persona="Leadership"),
+    )
+
+    assert result.capability == "historical_analysis"
+    assert result.group_by is None
+    assert result.metrics == ["quantity"]
+
+
 def test_ambiguous_store_performance_requests_metric_clarification():
     result = _leadership_defaults(
         "Which store performed best?",
@@ -709,6 +762,63 @@ def test_stockout_ranking_presentation_keeps_position_identity_and_metrics():
     assert "stockout_risk" not in view.columns
     assert view.iloc[0]["store_name"] == "Central"
     assert display["result_counts"]["matching_result_rows"] == 1
+
+
+@pytest.mark.parametrize(
+    ("group_by", "column", "expected"),
+    [
+        ("store", "store_name", {"Alpha": 2, "Beta": 1}),
+        ("brand", "brand", {"Samsung": 3, "Apple": 0}),
+        ("category", "category", {"Phones": 3, "Audio": 0}),
+    ],
+)
+def test_stockout_comparison_presentation_aggregates_to_requested_group(
+    group_by, column, expected
+):
+    intent = Intent(
+        capability="stockout_risk",
+        question_kind="comparison",
+        metrics=["stockout_risk"],
+        filters=Filters(),
+        group_by=group_by,
+    )
+    frame = pd.DataFrame([
+        {"store_name": "Alpha", "brand": "Samsung", "category": "Phones", "stockout_risk_v1": "High"},
+        {"store_name": "Alpha", "brand": "Samsung", "category": "Phones", "stockout_risk_v1": "High"},
+        {"store_name": "Alpha", "brand": "Apple", "category": "Audio", "stockout_risk_v1": "Medium"},
+        {"store_name": "Beta", "brand": "Samsung", "category": "Phones", "stockout_risk_v1": "High"},
+        {"store_name": "Beta", "brand": "Apple", "category": "Audio", "stockout_risk_v1": "Low"},
+    ])
+
+    view, display = _presentation(frame, intent)
+
+    assert list(view.columns) == [column, "high_risk_positions"]
+    assert dict(zip(view[column], view["high_risk_positions"])) == expected
+    assert display["result_counts"]["matching_result_rows"] == 5
+    assert display["total_result_count"] == len(expected)
+    assert display["has_more"] is False
+
+
+def test_stockout_product_comparison_keeps_aggregation_for_explicit_store_scope():
+    intent = Intent(
+        capability="stockout_risk",
+        question_kind="comparison",
+        metrics=["stockout_risk"],
+        filters=Filters(stores=["Alpha"]),
+        group_by="product",
+    )
+    frame = pd.DataFrame([
+        {"product_name": "Product A", "store_id": 1, "store_name": "Alpha", "stockout_risk_v1": "High"},
+        {"product_name": "Product A", "store_id": 1, "store_name": "Alpha", "stockout_risk_v1": "High"},
+        {"product_name": "Product B", "store_id": 1, "store_name": "Alpha", "stockout_risk_v1": "Medium"},
+    ])
+
+    view, _ = _presentation(frame, intent, "Compare stockout risk by product at Alpha")
+
+    assert view.to_dict(orient="records") == [
+        {"product_name": "Product A", "high_risk_positions": 2},
+        {"product_name": "Product B", "high_risk_positions": 0},
+    ]
 
 
 def test_result_contract_rejects_stockout_rows_without_risk_or_coverage():

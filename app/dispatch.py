@@ -14,7 +14,6 @@ import math
 from typing import Optional
 
 import pandas as pd
-
 from app.calc.metrics import Rules, enrich_inventory
 from app.semantic.queries import Queries, QueryResult, restrict, window_for
 
@@ -85,6 +84,11 @@ def _finalize_sales(df, intent):
 
     out = df.copy()
     notes = []
+    counts = dict(out.attrs.get("result_counts", {}))
+    counts["matching_result_rows"] = len(out)
+    for column, key in (("units", "sales_units_total"), ("revenue", "sales_revenue_total")):
+        if column in out.columns:
+            counts[key] = float(pd.to_numeric(out[column], errors="coerce").sum())
 
     sort = getattr(intent, "sort", None)
 
@@ -128,7 +132,9 @@ def _finalize_sales(df, intent):
 
         out = out.head(limit)
 
-    return out.reset_index(drop=True), notes
+    out = out.reset_index(drop=True)
+    out.attrs["result_counts"] = counts
+    return out, notes
 
 
 def _inventory_dispatch(
